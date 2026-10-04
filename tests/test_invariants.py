@@ -26,6 +26,18 @@ class EvidencePrivacyTests(unittest.TestCase):
     def test_explicit_secret_redaction_in_opaque_body(self):
         self.assertEqual(scrub_text("echo:opaque-value", secrets=["opaque-value"]), "echo:[REDACTED]")
 
+    def test_large_opaque_response_retains_body_and_redacts_adjacent_credentials(self):
+        body = "x" * (1024 * 1024) + ' access_token="private-long-body-token"'
+        with tempfile.TemporaryDirectory() as directory:
+            store = EvidenceStore(directory)
+            try:
+                record = store.add("http_probe", {"response": {"body": body}})
+                retained = store.get(record["id"])["data"]["response"]["body"]
+                self.assertEqual(retained, "x" * (1024 * 1024) + " access_token=[REDACTED]")
+                self.assertNotIn("private-long-body-token", json.dumps(record))
+            finally:
+                store.close()
+
     def test_database_does_not_retain_original_json_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             store = EvidenceStore(directory)

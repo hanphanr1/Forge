@@ -7,14 +7,14 @@ Global options:
 - `--version`: print the FORGE version without opening an evidence store.
 - `--project PATH`: an existing target folder; place before the command.
 
-Relative input paths resolve against that project. Operational single-command failures return exit 2 and sanitized JSON stderr. Help/argument parsing follows argparse's normal CLI output. Successful command output is JSON `{ "ok": true, "result": ... }`; a `probe-run` result can still describe a stopped or failed flow.
+Relative input paths resolve against that project. Operational single-command failures return exit 2 and sanitized JSON stderr. Help/argument parsing follows argparse's normal CLI output. Successful command output is JSON `{ "ok": true, "result": ... }`; `probe-run` and `run-target` can still describe failed/stopped operations. Inspect their result fields.
 
 ## Tasks
 
 | Command | Inputs | Result |
 |---|---|---|
 | `init` | `--target URL`, optional `--goal TEXT` | New immutable task and workflow location |
-| `status` | None | Latest task/progress and recent project evidence; no file rehash |
+| `status` | None | Latest task/progress, historical HTTP/target verification records and recent evidence; no file rehash |
 | `checkpoint` | Required `--phase`, `--summary`, `--expect-revision`; optional task/state/next/blocker/evidence/file | New task-specific progress revision |
 | `resume` | Optional `--task ID`, `--checkpoint ID` | Selected state and current integrity of checkpointed files |
 | `history` | Optional task, `--after-revision N`, `--limit N` | Ascending checkpoint page, `has_more` and cursor |
@@ -54,6 +54,28 @@ Probe options: `--rules`, `--transport urllib|curl_cffi`, `--impersonate` (alias
 `probe-run` adds repeated `--stop-bucket`. Default stop bucket is `TERMINAL`; explicit values replace the default. Response extraction and `${flow.NAME}` syntax are documented in [HTTP flows](http-flows.md).
 
 HAR import adds `--limit`, `--max-body`, `--rules` and never replays traffic. Imported entries do not qualify as live controls. `diff` compares normalized redacted exchanges, not private raw values.
+
+`har-to-flow HAR --output NEW_PATH` converts a selected capture prefix into an editable `probe-run` array without requests or captured URL/header/string values. Options: `--limit` (1..1000, default 50) and `--max-input-bytes` (up to 128 MiB, default 16 MiB). It returns required environment descriptors, hashes and omissions/warnings. Existing or unsafe output paths and unsupported bodies fail. See [HAR templates](har-flows.md).
+
+## Target implementation controls
+
+```sh
+forge --project target run-target target-controls.json --timeout 30 --max-output 1048576
+forge --project target verify-target --positive "<positive-target-run-id>" --negative "<negative-target-run-id>"
+```
+
+The spec declares one argv command, source files, client/egress context, a bucket selector and exactly one positive/negative control. No shell is used. Timeout is per control (finite, >0, at most 3600 seconds); output cap is combined retained stdout/stderr per control (1 byte..16 MiB). Deadlines include inherited pipe EOF; timeout cleanup targets the process tree/group.
+
+Controls need complete stdout JSON, the expected HIT/FREE or FAIL bucket, exit zero, no reported error, no truncation/timeout and unchanged listed sources. `TERMINAL` stops later controls. Results contain `runs`, `passed`, `verification`, `stopped`, `stop_reason`, `requested` and `completed`. `verify-target` requires distinct, same-invocation runs and hashes the current sources again. It rejects stale or failed controls. See [target controls](target-runs.md) for schema and privacy limits. Trusted programs retain your permissions and environment access; this is not a sandbox.
+
+## Protocol map
+
+```sh
+forge --project target protocol-map --limit 100 --max-endpoints 200
+forge --project target protocol-map --evidence "<capture-id>" --evidence "<live-probe-id>"
+```
+
+Read-only metadata summary of relevant static indexes/searches, HAR exchanges and live probes. Explicit IDs take precedence over the newest-record window. Bounds: `--limit` 1..1000, `--max-endpoints` 1..5000. Output preserves citations and distinct provenance categories, reports sampling/truncation, and never promotes imported/static evidence to live authentication. No raw-file scanning or network calls. See [protocol map](protocol-map.md).
 
 ## Runtime
 

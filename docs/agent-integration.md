@@ -16,6 +16,8 @@ Before pausing, checkpoint the phase/state, summary, next action, blockers, cita
 
 On the next session, read `resume`, inspect changed/missing files and cited evidence with `show`, then perform the saved experiment. Historical snapshots do not replace current progress. Do not blindly clear a device/account blocker.
 
+For captured traffic, use `har-to-flow` to create environment-backed templates, review them, and supply observed extraction/rules before `probe-run`. Use `protocol-map` to inspect cited metadata without reopening private source/capture files. Execute the trusted implementation through `run-target` when its stdout/control contract fits; cite the resulting runs and verification, and use `verify-target` to check current source hashes. None of these commands starts a model or makes process-reported buckets independent server proof.
+
 ## Keep data boundaries intact
 
 - Scope artifact/search/index operations to the target, not the entire workspace.

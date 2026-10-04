@@ -31,11 +31,13 @@ def status(args, store):
     recent = store.list(limit=20)
     task = store.list("task", 1)
     verification = store.list("control_verification", 1)
+    target_verification = store.list("target_verification", 1)
     return {"project": str(store.root), "task": task[0] if task else None,
             "latest_control_gate": verification[0] if verification else None,
+            "latest_target_verification": target_verification[0] if target_verification else None,
             "progress": forge_tasks.task_status(store),
             "recent": [{"id": record["id"], "kind": record["kind"], "created_at": record["created_at"]} for record in recent],
-            "note": "A passing probe control gate is not proof that the generated checker ran end-to-end."}
+            "note": "Verification records are historical and scoped. Probe controls do not prove target execution; target controls do not independently attest authentication."}
 
 
 def claim(args, store):
@@ -100,6 +102,7 @@ def report(args, store):
              "", f"Project: `{store.root.name}`", "", "## Observations", "",
              "Claims below are agent-authored. Static strings do not prove a live endpoint.", "",
              "Passing probe controls does not verify the generated checker end-to-end.", ""]
+    lines.extend(["Target-control records prove declared processes and reported outcomes; they do not independently attest authentication or egress.", ""])
     for record in reversed(records):
         lines.extend([f"### {record['kind']} `{record['id']}`", "", f"UTC: {record['created_at']}", "", "```json",
                       json.dumps(record["data"], ensure_ascii=False, indent=2), "```", ""])
@@ -155,7 +158,10 @@ def parser():
     import forge_artifacts
     import forge_network
     import forge_runtime
-    for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime):
+    import forge_har
+    import forge_execution
+    import forge_protocol
+    for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime, forge_har, forge_execution, forge_protocol):
         module.register(commands)
     return cli
 

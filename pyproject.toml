@@ -39,7 +39,7 @@ Changelog = "https://github.com/hanphanr1/Forge/blob/main/CHANGELOG.md"
 [tool.setuptools]
 py-modules = [
     "forge", "forge_core", "forge_artifacts", "forge_network", "forge_runtime",
-    "forge_toolchain", "forge_tasks", "forge_version",
+    "forge_toolchain", "forge_tasks", "forge_version", "forge_har", "forge_execution", "forge_protocol",
 ]
 
 [tool.setuptools.dynamic]

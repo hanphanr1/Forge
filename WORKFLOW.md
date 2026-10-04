@@ -15,7 +15,7 @@ forge --project "<target-folder>" status
 
 The folder must exist. Global `--project` goes before the command; relative input files resolve against the target, not the current directory. Source checkout execution is `python "<forge-checkout>/forge.py" ...`.
 
-Commands emit `{ok, result}` JSON. Single-operation failures use exit 2 with sanitized JSON stderr. For `probe-run`, inspect `completed`, `requested`, `stopped` and `stop_reason` even when `ok` is true.
+Commands emit `{ok, result}` JSON. Single-operation failures use exit 2 with sanitized JSON stderr. For `probe-run` and `run-target`, inspect completion, stopped/reason and actual result fields even when `ok` is true.
 
 ## 1. Recover or initialize the task
 
@@ -70,6 +70,8 @@ Keep private apps/data out of scope. If hardware is missing, checkpoint the exac
 
 Construct explicit request JSON from observed source/capture. Do not invent headers, query fields, device values or TLS identities. Use `${ENV_VAR}` for externally supplied secrets.
 
+For an explicitly scoped HAR, `har-to-flow --output` creates a new editable request array without replay. Fill its returned environment descriptors from trusted capture/fresh values, remove stale captured cookies when a fresh cookie session is needed, and add only observed extraction selectors and classification rules. Do not infer token bindings from matching strings. See [HAR templates](docs/har-flows.md).
+
 Use `probe` for one exchange and `probe-run` for a sequential cookie session. Declare JSON/header extraction explicitly and reference earlier values with `${flow.NAME}`. Dependencies and rules are validated before the first request; materialized values are checked again before dispatch. Missing/truncated extraction stops before dependent traffic. Extraction values are command-local, not replayable database data.
 
 The runner does not infer signing algorithms, nonce generation or cryptographic request builders. Write a real target helper where those are required. Do not use literal placeholder tokens or redacted evidence as a fallback.
@@ -86,11 +88,13 @@ Before changing the protocol after widespread identical failures, run a known-go
 
 Use `diff` to compare recorded exchanges. Imported HAR is an observation, not a fresh live control.
 
+Use `protocol-map` to review stored URL/method/header/field metadata and cited source locations. Keep `static_candidate`, `captured_http` and `live_http` separate. Check window/input/output sampling flags; a map does not recover omitted raw data or verify authentication. See [protocol map](docs/protocol-map.md).
+
 Implement the target using its existing conventions and working session/proxy modules. Classification must use observed body/messages, with meaningful failure/retry/error/terminal branches. Do not map unknown exceptions to false credential failures or create a dummy generator.
 
 `verify` is a narrow protocol evidence gate: distinct live positive/negative exchanges, complete responses, matching endpoint/transport, matching declared client/egress and a cited protocol JSON document. It does not execute the target checker or validate subscription parsing and every server branch.
 
-Run the actual implementation end-to-end. Exercise changed behavior and meaningful terminal/error paths. State unavailable positive controls, OTP or hardware exactly. Finish reachable work without claiming an untested vendor login succeeded.
+Run the actual implementation end-to-end. `run-target` can execute an explicit trusted argv command with two declared controls, bounded output/deadlines and listed source hashes; `verify-target` rechecks saved controls against current sources. Use credential-free context and source paths, and do not put credentials in literal command metadata. A passing target gate proves execution and process-reported outcomes, not independent network/client/IP attestation or complete dependency coverage. Exercise meaningful terminal/error paths too. State unavailable positive controls, OTP or hardware exactly. Finish reachable work without claiming an untested vendor login succeeded. See [target controls](docs/target-runs.md).
 
 ## 6. Handoff
 

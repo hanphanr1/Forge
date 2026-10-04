@@ -15,7 +15,7 @@ python examples/smoke.py --cli forge
 python examples/smoke.py --transport curl_cffi --cli forge
 ```
 
-The HTTP smoke uses a loopback fixture and temporary target directories. It performs real CLI subprocesses, live local login/profile requests, control comparison, checkpoint handoff, stale-write rejection, file integrity and history pagination. It is not proof of a vendor login.
+The HTTP smoke uses a loopback fixture and temporary target directories. It performs real CLI subprocesses, login/profile requests, reviewed HAR template replay, mixed-source protocol maps, actual implementation controls, changed-source verification rejection, checkpoint handoff and history pagination. It is not proof of a vendor login.
 
 Hardware/tool checks are separate. Do not mark a device path verified from a mocked ADB/Frida response or a host version command. Run the actual configured tool when modifying its adapter and describe any missing prerequisite.
 
@@ -30,6 +30,8 @@ Hardware/tool checks are separate. Do not mark a device path verified from a moc
 - Preserve the author's attribution and the MIT notice. Optional tool licenses remain separate.
 
 Use synthetic fixture data and an ephemeral loopback server for network tests. Tests must not need vendor accounts, fixed ports, solver credits or globally installed SDKs. Optional curl tests skip when the dependency is absent; CI installs it to exercise both transports.
+
+The repository's default branch requires a reviewed PR, resolved review threads, a linear history and all six platform/Python CI checks plus the package check. Use squash or rebase merges. Only `hanphanr1` has the owner bypass; contributors should not rely on direct pushes or force pushes to the protected branch.
 
 ## Build and release
 

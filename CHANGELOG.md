@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 - 2026-10-05
+
+- HAR-to-flow conversion with environment-backed URL/header/body templates, source/output hashes, visible omissions and no automatic replay or captured credential assignments.
+- Actual trusted target execution with complete two-control preflight, concurrent bounded captures, process-tree deadlines, source integrity and same-invocation positive/negative verification.
+- Read-only protocol maps with URL/method/header/field metadata, source-location citations, source-provenance validation and separate static/captured/live categories.
+- Extended runnable demo exercises reviewed HAR replay, actual implementation controls, changed-source rejection and mixed-source maps through source and installed CLI.
+- Fixed quadratic text-secret matching on long unbroken non-secret response bodies while retaining adjacent credential redaction.
+- Target verification appears separately from historical HTTP control gates in status/report guidance.
+
 ## 0.1.0 - 2026-10-05
 
 First public release.

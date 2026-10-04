@@ -25,7 +25,7 @@ _SENSITIVE = re.compile(
     r"api[-_]?key|credential|csrf|xsrf|session[-_]?id|email|username", re.I
 )
 _TEXT_SECRET = re.compile(
-    r'(?i)((?:["\']?[\w.-]*(?:password|passwd|token|secret|cookie|authorization|api[_-]?key|csrf|xsrf)[\w.-]*["\']?)'
+    r'(?i)(?<![\w.-])((?:["\']?[\w.-]*(?:password|passwd|token|secret|cookie|authorization|api[_-]?key|csrf|xsrf)[\w.-]*["\']?)'
     r'\s*[=:]\s*)(?:"[^"\r\n]*"|\'[^\'\r\n]*\'|[^\s,;&<>\r\n]+)'
 )
 _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")

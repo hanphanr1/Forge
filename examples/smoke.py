@@ -1,6 +1,7 @@
 """Exercise the actual CLI against disposable local HTTP and task fixtures."""
 
 import argparse
+import os
 import json
 from pathlib import Path
 import subprocess
@@ -19,9 +20,9 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def invoke(cli, project, *arguments, expected_exit=0):
+def invoke(cli, project, *arguments, expected_exit=0, env=None):
     result = subprocess.run([*cli, "--project", str(project), *arguments], cwd=project.parent,
-                            stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env=env)
     require(result.returncode == expected_exit,
             f"CLI exit {result.returncode}, expected {expected_exit}: {result.stderr.decode('utf-8', 'replace')}")
     payload = json.loads((result.stdout if expected_exit == 0 else result.stderr).decode("utf-8"))
@@ -60,6 +61,80 @@ def run(cli, transport):
                           "--protocol", "protocol.json")
             require(gate["data"]["passed"], "Live local control gate failed")
 
+            with server.session_lock:
+                captured_cookie, captured_token = next(iter(server.sessions.items()))
+            har = {"log": {"entries": [
+                {"request": {"url": base + "/login", "method": "POST",
+                             "headers": [{"name": "Content-Type", "value": "application/json"}],
+                             "postData": {"mimeType": "application/json", "text": json.dumps(flow[0]["json"])}},
+                 "response": {"status": 200, "headers": [], "content": {"text": json.dumps({"message": "SIGNED_IN"})}}},
+                {"request": {"url": base + "/profile", "method": "GET", "headers": [
+                    {"name": "Authorization", "value": "Bearer " + captured_token},
+                    {"name": "Cookie", "value": "demo_session=" + captured_cookie}]},
+                 "response": {"status": 200, "headers": [], "content": {"text": json.dumps({"message": "PROFILE_READY"})}}}
+            ]}}
+            (project / "owned.har").write_text(json.dumps(har), encoding="utf-8")
+            exported = invoke(cli, project, "har-to-flow", "owned.har", "--output", "exported-flow.json")
+            require(not exported["replayed"], "HAR conversion replayed requests")
+            environment = os.environ.copy()
+            for binding in exported["variables"]:
+                pointer, separator, nested = binding["pointer"].partition("#")
+                value = har
+                for part in pointer[1:].split("/"):
+                    part = part.replace("~1", "/").replace("~0", "~")
+                    value = value[int(part)] if isinstance(value, list) else value[part]
+                if separator:
+                    value = json.loads(value)
+                    for part in nested[1:].split("/") if nested else []:
+                        part = part.replace("~1", "/").replace("~0", "~")
+                        value = value[int(part)] if isinstance(value, list) else value[part]
+                environment[binding["variable"]] = value
+            reviewed = json.loads((project / "exported-flow.json").read_text(encoding="utf-8"))
+            reviewed[0]["extract"] = flow[0]["extract"]
+            reviewed[1]["headers"] = {"Authorization": "Bearer ${flow.AUTH}"}
+            for request, original in zip(reviewed, flow):
+                request["rules"] = original["rules"]
+            (project / "reviewed-flow.json").write_text(json.dumps(reviewed), encoding="utf-8")
+            replay = invoke(cli, project, "probe-run", "reviewed-flow.json", "--transport", transport, env=environment)
+            require(not replay["stopped"] and [item["data"]["bucket"] for item in replay["exchanges"]] == ["HIT", "HIT"],
+                    "Reviewed HAR flow did not run against the actual fixture")
+
+            captured = invoke(cli, project, "har-import", "owned.har")
+            (project / "client_routes.js").write_text(f'const LOGIN = "{base}/login";', encoding="utf-8")
+            indexed = invoke(cli, project, "artifact-index", "client_routes.js")
+            mapped = invoke(cli, project, "protocol-map")
+            categories = {observation["category"] for endpoint in mapped["endpoints"] for observation in endpoint["observations"]}
+            require(categories == {"static_candidate", "captured_http", "live_http"}, "Protocol map lost provenance categories")
+            require(not mapped["authentication_verified"] and all(not endpoint["proven_live"] for endpoint in mapped["endpoints"] if "method" not in endpoint),
+                    "Protocol map promoted static observations")
+            map_citations = {citation["evidence_id"] for endpoint in mapped["endpoints"]
+                             for observation in endpoint["observations"] for citation in observation["citations"]}
+            require(indexed["id"] in map_citations and all(item["id"] in map_citations for item in captured["exchanges"]),
+                    "Protocol map lost capture/source citations")
+
+            (project / "target_impl.py").write_bytes((ROOT / "examples/demo_checker.py").read_bytes())
+            implementation = {"command": ["${FORGE_DEMO_PYTHON}", "target_impl.py"], "files": ["target_impl.py"],
+                              "context": {"client": "fixture-client", "egress": "loopback"},
+                              "controls": [
+                                  {"name": "positive", "args": ["--url", "${FORGE_DEMO_URL}", "--login", "demo",
+                                                               "--password", "${FORGE_DEMO_POSITIVE}"], "expected_bucket": "HIT"},
+                                  {"name": "negative", "args": ["--url", "${FORGE_DEMO_URL}", "--login", "demo",
+                                                               "--password", "${FORGE_DEMO_NEGATIVE}"], "expected_bucket": "FAIL"}]}
+            (project / "implementation.json").write_text(json.dumps(implementation), encoding="utf-8")
+            environment.update(FORGE_DEMO_PYTHON=sys.executable, FORGE_DEMO_URL=base,
+                               FORGE_DEMO_POSITIVE="demo-password", FORGE_DEMO_NEGATIVE="wrong-demo-password")
+            executed = invoke(cli, project, "run-target", "implementation.json", env=environment)
+            require(executed["passed"] and len(executed["runs"]) == 2 and executed["verification"],
+                    "Actual target implementation controls did not pass")
+            run_ids = {item["data"]["control"]: item["id"] for item in executed["runs"]}
+            checked = invoke(cli, project, "verify-target", "--positive", run_ids["positive"], "--negative", run_ids["negative"])
+            require(checked["data"]["passed"], "Saved target controls failed current-source verification")
+            with (project / "target_impl.py").open("a", encoding="utf-8") as output:
+                output.write("\\n# owned smoke revision\\n")
+            changed_target = invoke(cli, project, "verify-target", "--positive", run_ids["positive"],
+                                    "--negative", run_ids["negative"], expected_exit=2)
+            require(not changed_target["ok"], "Changed implementation remained verified")
+
             saved = invoke(cli, project, "checkpoint", "--task", task["id"], "--phase", "verify", "--state", "blocked",
                            "--summary", "Local controls passed; awaiting fixture review", "--next", "Review the fixture protocol",
                            "--blocker", "Fixture review pending", "--evidence", gate["id"], "--file", "fixture_auth.py",
@@ -96,7 +171,9 @@ def run(cli, transport):
             return {"ok": True, "source": "local-fixture", "transport": transport, "flow": buckets,
                     "negative": failed["data"]["bucket"], "control_gate": True, "checkpoint_revision": 2,
                     "stale_rejected": True, "file_integrity": integrity, "history_states": states,
-                    "historical_resume": True, "no_issued_secret_in_store": True}
+                    "historical_resume": True, "no_issued_secret_in_store": True,
+                    "har_flow": ["HIT", "HIT"], "protocol_categories": sorted(categories),
+                    "target_controls": True, "changed_target_rejected": True}
         finally:
             server.shutdown()
             thread.join(timeout=5)

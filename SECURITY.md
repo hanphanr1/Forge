@@ -20,6 +20,10 @@ FORGE is a local investigation tool, not a secret vault. Known request/environme
 
 Headers are parsed by the selected transport; they are not a raw wire capture. libcurl can normalize obsolete folding before Python sees the header. The extraction and materialized-request checks cannot attest to the original wire representation.
 
+HAR conversion parameterizes captured URLs, headers and string body values but retains field/header names and some structural constants. Review generated templates before sharing. Captured signatures, binary bodies and wire encodings are not automatically reconstructed.
+
+`run-target` executes explicitly supplied trusted code without a shell; it is **not a sandbox**. Programs retain user permissions and inherited environment access and may write files or communicate externally. The output cap/deadline and redaction protect FORGE's captures, not the workstation from malicious code. Only listed sources are hashed; unlisted dependencies, interpreters and transient edits between hashes are not attested. Environment/argument/tagged values are scrubbed where known, but arbitrary transformations or unrelated inherited secrets can escape detection. Process-reported buckets and declared client/egress context are not independent authentication evidence.
+
 ## External tools
 
 JADX, ADB, Frida, radare2, Java and optional curl components have their own update and trust boundaries. Install from observed official sources, retain version/hash provenance locally and avoid running untrusted binaries on a sensitive workstation. FORGE does not bundle those tools or silently install an emulator.

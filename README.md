@@ -10,7 +10,7 @@ FORGE imports client artifacts, indexes source-located strings, captures explici
 
 Use it directly or from a coding agent with shell access. FORGE does not call a model, require a model API key, or register an MCP server. Your agent still reads request builders, chooses experiments, and writes the target implementation.
 
-[CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [Task handoff](docs/checkpoints.md) · [Contributing](CONTRIBUTING.md)
+[CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [HAR templates](docs/har-flows.md) · [Target controls](docs/target-runs.md) · [Protocol map](docs/protocol-map.md) · [Task handoff](docs/checkpoints.md) · [Contributing](CONTRIBUTING.md)
 
 ## The workflow
 
@@ -126,6 +126,21 @@ The flow syntax is explicit:
 
 `${ENV_VAR}` reads an explicit environment value. `${flow.AUTH}` reads an earlier extraction within this command. Extraction values remain in command memory and are scrubbed from stored exchanges, including opaque echoes. Missing, malformed or truncated extraction stops the flow before a dependent request. See [HTTP flows](docs/http-flows.md) for selectors, stop precedence and limitations.
 
+## From capture to executed controls
+
+```sh
+forge --project investigation har-to-flow capture.har --output flows/from-capture.json
+forge --project investigation protocol-map --limit 100
+forge --project investigation run-target target-controls.json
+forge --project investigation verify-target --positive "<positive-target-run-id>" --negative "<negative-target-run-id>"
+```
+
+HAR conversion writes editable request templates and source/output hashes without sending traffic or copying captured URL/header/string values. Fill the returned environment variables and add only selectors/rules supported by observed protocol evidence. See [HAR templates](docs/har-flows.md).
+
+`run-target` executes trusted project code for two explicit controls with bounded stdout/stderr, process deadlines and source hashes. Exit zero alone cannot pass. `verify-target` checks the distinct runs and current source hashes. Buckets are reported by that program, not independent attestation of authentication or IP. See [target controls](docs/target-runs.md).
+
+`protocol-map` summarizes stored URLs, methods, header/field names and source citations. Static candidates, imported captures and live HTTP observations stay separate; it neither opens raw captures nor probes endpoints. See [protocol map](docs/protocol-map.md).
+
 ## What is included
 
 | Area | Commands | Boundary |
@@ -133,7 +148,9 @@ The flow syntax is explicit:
 | Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
 | Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search` | Bounded readers; strings are candidates, not live protocol proof |
 | Runtime | `jadx`, `native`, `adb`, `frida`, `doctor` | Uses installed tools and configured devices |
-| HTTP | `probe`, `probe-run`, `har-import`, `diff` | Explicit requests and body rules; no automatic retries or redirects |
+| HTTP | `probe`, `probe-run`, `har-import`, `har-to-flow`, `diff` | Explicit requests and editable capture templates; no automatic retries or replay |
+| Implementation | `run-target`, `verify-target` | Trusted-code execution and declared controls; not a sandbox or independent authentication proof |
+| Protocol map | `protocol-map` | Cited metadata view; static strings and imported HAR do not become live proof |
 | Evidence | `claim`, `evidence`, `show`, `verify`, `report` | Citations and a narrow live-control gate |
 
 Artifacts keep SHA-256, origin and source locations. HTTP rules classify observed response bodies rather than guessing from a status code. The first matching rule wins; an unmatched response is `UNKNOWN`. `TERMINAL` stops deterministic refusals instead of retrying them.
@@ -165,7 +182,7 @@ Each target stores data under `.forge/`:
 
 The database is not a source for replaying credentials. Redaction is best-effort: unknown unlabeled secrets, raw artifacts and screenshots may still contain private data. Keep the store local, inspect exports, and do not commit captures or credentials. Checkpoint file entries contain paths and hashes, not file contents.
 
-`verify` requires distinct live positive and negative exchanges with complete responses, matching endpoint/transport and matching declared client/egress identifiers. It **does not** prove that a generated checker ran end-to-end, independently measure the egress, or verify all server branches. Run the target implementation separately.
+`verify` requires distinct live positive and negative exchanges with complete responses, matching endpoint/transport and matching declared client/egress identifiers. It **does not** execute an implementation. Use `run-target` and `verify-target` for declared process controls; these still do not independently measure egress or verify every server branch.
 
 ## Development
 
@@ -176,7 +193,7 @@ python examples/smoke.py
 python examples/smoke.py --transport curl_cffi
 ```
 
-CI runs the regression suite and a local HTTP demo on Windows, Linux and macOS, and builds a wheel and source archive. Runtime/device checks still require their actual dependencies and hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change and release procedure.
+CI runs the regression suite and the local HTTP demo on Windows, Linux and macOS, including HAR conversion/reviewed replay, actual implementation controls, changed-source rejection and mixed-source protocol maps, then builds and exercises the installed wheel. Runtime/device checks still require their actual dependencies and hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change and release procedure.
 
 ## Author and license
 
