@@ -1,0 +1,34 @@
+name: Bug report
+description: Report an observable command or evidence failure.
+body:
+  - type: markdown
+    attributes:
+      value: Use synthetic data. Do not attach credentials, private captures or client binaries.
+  - type: input
+    id: version
+    attributes:
+      label: FORGE version and Python version
+      description: Include forge --version and the Python version.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and optional tool versions
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Commands and synthetic request/fixture needed to reproduce.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Include sanitized output, actual exit status and relevant evidence IDs.
+    validations:
+      required: true

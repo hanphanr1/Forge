@@ -1,0 +1,22 @@
+[
+  {
+    "url": "http://127.0.0.1:8765/login",
+    "method": "POST",
+    "json": {"login": "demo", "password": "demo-password"},
+    "context": {"client": "forge-demo", "egress": "loopback"},
+    "extract": {"AUTH": {"json_path": "/data/opaque"}},
+    "rules": [
+      {"bucket": "HIT", "json_path": "/message", "equals": "SIGNED_IN"},
+      {"bucket": "FAIL", "json_path": "/message", "equals": "INVALID_PASSWORD"}
+    ]
+  },
+  {
+    "url": "http://127.0.0.1:8765/profile",
+    "headers": {"Authorization": "Bearer ${flow.AUTH}"},
+    "context": {"client": "forge-demo", "egress": "loopback"},
+    "rules": [
+      {"bucket": "HIT", "json_path": "/message", "equals": "PROFILE_READY"},
+      {"bucket": "FAIL", "json_path": "/message", "equals": "INVALID_SESSION"}
+    ]
+  }
+]

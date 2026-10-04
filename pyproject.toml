@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-protocol"
+dynamic = ["version"]
+description = "Local evidence and resumable workflows for protocol investigation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "hanphanr1"}]
+keywords = ["protocol", "reverse-engineering", "http", "evidence", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Debuggers",
+]
+
+[project.optional-dependencies]
+http = ["curl-cffi>=0.16.3,<0.17"]
+
+[project.scripts]
+forge = "forge:main"
+
+[project.urls]
+Homepage = "https://github.com/hanphanr1/Forge"
+Repository = "https://github.com/hanphanr1/Forge.git"
+Issues = "https://github.com/hanphanr1/Forge/issues"
+Changelog = "https://github.com/hanphanr1/Forge/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+py-modules = [
+    "forge", "forge_core", "forge_artifacts", "forge_network", "forge_runtime",
+    "forge_toolchain", "forge_tasks", "forge_version",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "forge_version.__version__"}

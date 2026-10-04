@@ -1,0 +1,11 @@
+include README.md WORKFLOW.md LICENSE CHANGELOG.md CONTRIBUTING.md SECURITY.md forge.cmd .gitignore .gitattributes
+recursive-include docs *.md
+recursive-include examples *.py *.json
+recursive-include tests *.py
+recursive-include .github *.yml *.md
+prune tools
+prune notes
+prune .forge
+prune dist
+prune build
+global-exclude __pycache__ *.py[cod] *.egg-info .env .env.* *.sqlite* *.db *.har *.apk *.apks *.xapk *.exe *.dll *.log *.pem *.key

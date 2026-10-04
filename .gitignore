@@ -1,0 +1,44 @@
+# Target evidence and local runtime dependencies
+.forge/
+/tools/
+/notes/
+/results/
+/captures/
+accounts*
+proxies*
+*.har
+*.apk
+*.apks
+*.xapk
+*.dex
+*.exe
+*.dll
+*.so
+*.dylib
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite*
+*.db
+*.log
+.env
+.env.*
+
+# Python and packaging output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

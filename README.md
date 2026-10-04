@@ -1,0 +1,185 @@
+# FORGE
+
+Local evidence and resumable workflows for protocol investigation.
+
+[![CI](https://github.com/hanphanr1/Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/hanphanr1/Forge/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-555)](pyproject.toml)
+[![MIT License](https://img.shields.io/badge/License-MIT-555)](LICENSE)
+
+FORGE imports client artifacts, indexes source-located strings, captures explicit HTTP flows, and keeps findings in a target-local evidence store. Checkpoints preserve the next experiment across sessions. Response extraction carries tokens between requests without turning the evidence database into a credential store.
+
+Use it directly or from a coding agent with shell access. FORGE does not call a model, require a model API key, or register an MCP server. Your agent still reads request builders, chooses experiments, and writes the target implementation.
+
+[CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [Task handoff](docs/checkpoints.md) · [Contributing](CONTRIBUTING.md)
+
+## The workflow
+
+```mermaid
+flowchart LR
+    Operator["You or your coding agent"] --> CLI["FORGE CLI"]
+    CLI --> Artifacts["Artifacts and indexes"]
+    CLI --> Capture["HTTP and runtime observations"]
+    CLI --> Tasks["Checkpoint / resume / history"]
+    Artifacts --> Store["Target-local evidence"]
+    Capture --> Store
+    Tasks <--> Store
+```
+
+The evidence store is local to each target. A resumed task carries its cited findings and next experiment; it does not start an autonomous agent.
+
+## Install
+
+Python 3.10 or newer. The core uses the standard library; runtime tools and the curl transport are optional.
+
+```sh
+git clone https://github.com/hanphanr1/Forge.git
+cd Forge
+python -m venv .venv
+```
+
+Activate the environment:
+
+```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```sh
+# Linux / macOS
+. .venv/bin/activate
+```
+
+Then install from this checkout:
+
+```sh
+python -m pip install -e .
+forge --version
+forge --help
+```
+
+If PowerShell blocks activation, invoke `.\.venv\Scripts\python.exe -m pip install -e .` and use `.\.venv\Scripts\forge.exe`; changing machine-wide execution policy is unnecessary.
+
+For explicit curl impersonation support:
+
+```sh
+python -m pip install -e ".[http]"
+```
+
+You can also run `python forge.py` without installing the package. Third-party binaries, virtual environments and captures are not distributed in this repository.
+
+## Start an investigation
+
+Create a dedicated folder for the target. `--project` selects that existing folder and goes **before** the command. Relative input paths resolve there, not against the shell's current directory.
+
+```sh
+mkdir investigation
+forge --project investigation doctor
+forge --project investigation init --target https://example.invalid --goal "Trace and verify the client login flow"
+forge --project investigation status
+```
+
+`example.invalid` is an illustrative target, not a supported service. Replace it with the official site identified during your investigation.
+
+Save progress before changing sessions or waiting for a device:
+
+```sh
+forge --project investigation checkpoint --phase analyze --state blocked --summary "Located the request builder; runtime capture is still needed" --next "Capture one authorized login on Android" --blocker "Awaiting a connected device" --expect-revision 0
+forge --project investigation resume
+```
+
+`resume` reports the saved state and file integrity. It does not execute the next action or silently clear blockers. Each checkpoint uses an expected revision to prevent a stale session from overwriting newer work.
+
+## Try a complete local flow
+
+The demo binds to loopback and uses disposable fixture credentials. It does not contact a vendor or accept production credentials.
+
+In one terminal:
+
+```sh
+python examples/demo_server.py
+```
+
+In another, from the repository root:
+
+```sh
+forge --project . probe-run examples/login-flow.json
+```
+
+The flow logs in, extracts a token from the JSON response, and sends it with the session cookie to the profile endpoint. Inspect the final exchange's `bucket` and the top-level `stopped` / `stop_reason`; `ok: true` alone does not mean an entire flow succeeded. Stop the demo server when finished.
+
+The flow syntax is explicit:
+
+```json
+[
+  {
+    "url": "http://127.0.0.1:8765/login",
+    "method": "POST",
+    "json": {"login": "demo", "password": "demo-password"},
+    "extract": {"AUTH": {"json_path": "/data/opaque"}}
+  },
+  {
+    "url": "http://127.0.0.1:8765/profile",
+    "headers": {"Authorization": "Bearer ${flow.AUTH}"}
+  }
+]
+```
+
+`${ENV_VAR}` reads an explicit environment value. `${flow.AUTH}` reads an earlier extraction within this command. Extraction values remain in command memory and are scrubbed from stored exchanges, including opaque echoes. Missing, malformed or truncated extraction stops the flow before a dependent request. See [HTTP flows](docs/http-flows.md) for selectors, stop precedence and limitations.
+
+## What is included
+
+| Area | Commands | Boundary |
+|---|---|---|
+| Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
+| Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search` | Bounded readers; strings are candidates, not live protocol proof |
+| Runtime | `jadx`, `native`, `adb`, `frida`, `doctor` | Uses installed tools and configured devices |
+| HTTP | `probe`, `probe-run`, `har-import`, `diff` | Explicit requests and body rules; no automatic retries or redirects |
+| Evidence | `claim`, `evidence`, `show`, `verify`, `report` | Citations and a narrow live-control gate |
+
+Artifacts keep SHA-256, origin and source locations. HTTP rules classify observed response bodies rather than guessing from a status code. The first matching rule wins; an unmatched response is `UNKNOWN`. `TERMINAL` stops deterministic refusals instead of retrying them.
+
+## Runtime tools
+
+Install only what the investigation needs:
+
+- [JADX](https://github.com/skylot/jadx) and a compatible Java runtime for Android decompilation.
+- [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) for ADB.
+- [Frida](https://frida.re/docs/installation/) for an explicit hook script and compatible target setup.
+- [radare2](https://github.com/radareorg/radare2) for native inspection.
+
+Tool discovery checks an explicit `FORGE_*` override, a portable tool directory beside the source modules, then `PATH`. A broken override fails rather than selecting a different executable. `doctor` reports the actual resolution. See [toolchain setup](docs/toolchain.md).
+
+Android requires an authorized device or an environment you have deliberately configured. FORGE does not install an emulator. Host-side Frida does not provide device-side injection by itself. This Windows-oriented runtime collection has no iOS adapter.
+
+## Evidence and privacy
+
+Each target stores data under `.forge/`:
+
+```text
+.forge/
+  evidence.sqlite3   # cited task, analysis and exchange records
+  blobs/             # original artifact bytes and explicit runtime captures
+  indexes/           # bounded static indexes
+  analysis/          # tool output such as JADX decompilation
+```
+
+The database is not a source for replaying credentials. Redaction is best-effort: unknown unlabeled secrets, raw artifacts and screenshots may still contain private data. Keep the store local, inspect exports, and do not commit captures or credentials. Checkpoint file entries contain paths and hashes, not file contents.
+
+`verify` requires distinct live positive and negative exchanges with complete responses, matching endpoint/transport and matching declared client/egress identifiers. It **does not** prove that a generated checker ran end-to-end, independently measure the egress, or verify all server branches. Run the target implementation separately.
+
+## Development
+
+```sh
+python -m unittest discover -s tests -v
+python -m pip wheel . --no-deps --wheel-dir dist
+python examples/smoke.py
+python examples/smoke.py --transport curl_cffi
+```
+
+CI runs the regression suite and a local HTTP demo on Windows, Linux and macOS, and builds a wheel and source archive. Runtime/device checks still require their actual dependencies and hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change and release procedure.
+
+## Author and license
+
+Created and maintained by [hanphanr1](https://github.com/hanphanr1).
+
+[MIT License](LICENSE). Optional third-party tools retain their own licenses.

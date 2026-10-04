@@ -1,0 +1,7 @@
+{
+  "url": "http://127.0.0.1:8765/login",
+  "method": "POST",
+  "json": {"login": "demo", "password": "deliberately-wrong"},
+  "context": {"client": "forge-demo", "egress": "loopback"},
+  "rules": [{"bucket": "FAIL", "json_path": "/message", "equals": "INVALID_PASSWORD"}]
+}
