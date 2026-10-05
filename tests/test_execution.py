@@ -694,9 +694,14 @@ print('{"bucket":"HIT"}')
     @unittest.skipIf(os.name == "nt", "Windows locks mapped executable images against byte modification")
     def test_actual_runtime_byte_change_during_control_invalidates_and_stops(self):
         executable, environment = self.copied_runtime()
-        self.source('''import json, sys
-with open(sys.executable, "ab") as output:
+        self.source('''import json, os, shutil, sys
+from pathlib import Path
+current = Path(sys.executable)
+replacement = current.with_name("replacement-owned-runtime")
+shutil.copy2(current, replacement)
+with replacement.open("ab") as output:
     output.write(b"owned-byte-change")
+os.replace(replacement, current)
 print('{"bucket":"HIT"}')
 ''')
         with patch.dict(os.environ, environment, clear=True):

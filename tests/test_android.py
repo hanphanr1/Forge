@@ -128,7 +128,7 @@ class ManifestTests(unittest.TestCase):
 class SelectionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -363,7 +363,7 @@ class CompatibilityTests(unittest.TestCase):
 class CommandBehaviorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.store = EvidenceStore(self.root)
         self.base = self.root / "base.apk"
         self.base.write_bytes(apk_bytes())
