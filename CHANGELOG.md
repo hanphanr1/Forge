@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 - 2026-10-05
+
+- Preserve all standard target buckets while retaining narrow positive/negative passing gates and deterministic TERMINAL stop behavior.
+- Bounded per-control JSON stdin with complete preflight and private evidence; owned demo sends actual login controls without credential argv.
+- Before/after/current resolved executable fingerprints and optional explicitly declared bounded version probes; v2 target verification rejects stale runtime bytes.
+- Immutable cited protocol snapshots and diffs, including field/status/provenance changes, omission flags and redacted-identity ambiguity.
+- Stored client artifact/member byte inventories and source-index projection diffs with endpoint/string citations; new indexes record creation-time hashes.
+- Bounded GraphQL operation, variable, selection, alias and fragment analysis from explicit sources/request evidence without exported values or network introspection.
+- Actual radare2 disassembly, xrefs and observed function-level call-reference graphs, with backend schema normalization and unresolved/capped memberships visible.
+- Android ADB preflight and explicit APK/APKS/XAPK split selection, compiled-manifest/package/version/dependency/ABI/API checks and new-install-only dispatch.
+- Metadata-only evidence ZIP handoffs with bounded citation closure, disclosure exclusions and content hashes; optional reviewed claim prose.
+- Correct Windows executable race checks for differing descriptor/path ctime semantics without dropping same-API change detection.
+
 ## 0.2.0 - 2026-10-05
 
 - HAR-to-flow conversion with environment-backed URL/header/body templates, source/output hashes, visible omissions and no automatic replay or captured credential assignments.

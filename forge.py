@@ -161,7 +161,12 @@ def parser():
     import forge_har
     import forge_execution
     import forge_protocol
-    for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime, forge_har, forge_execution, forge_protocol):
+    import forge_comparisons
+    import forge_graphql
+    import forge_android
+    import forge_bundle
+    for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime, forge_har, forge_execution, forge_protocol,
+                   forge_comparisons, forge_graphql, forge_android, forge_bundle):
         module.register(commands)
     return cli
 

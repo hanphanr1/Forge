@@ -15,7 +15,7 @@ python examples/smoke.py --cli forge
 python examples/smoke.py --transport curl_cffi --cli forge
 ```
 
-The HTTP smoke uses a loopback fixture and temporary target directories. It performs real CLI subprocesses, login/profile requests, reviewed HAR template replay, mixed-source protocol maps, actual implementation controls, changed-source verification rejection, checkpoint handoff and history pagination. It is not proof of a vendor login.
+The smoke uses a loopback fixture and temporary target directories. It performs actual CLI subprocesses, login/profile requests, reviewed HAR replay, mixed-source maps, cited protocol/client diffs, GraphQL structure/value-exclusion checks, JSON-stdin implementation controls, executable/version fingerprints, changed-source rejection, bundle member hashes, checkpoints and history pagination. It is not proof of a vendor login.
 
 Hardware/tool checks are separate. Do not mark a device path verified from a mocked ADB/Frida response or a host version command. Run the actual configured tool when modifying its adapter and describe any missing prerequisite.
 

@@ -10,6 +10,8 @@ forge --project ./owned-target protocol-map --evidence ev_CAPTURE_ID --evidence 
 
 Replace the illustrative IDs with IDs from `evidence` or `show`. Repeating an ID has no effect. Explicit IDs take precedence over the newest-record window: all unique selected records are considered, even with `--limit 1`. Unknown IDs, unrelated evidence kinds, non-static analysis records, and invalid protocol metadata are errors. Bounds are validated even for explicit selections.
 
+To retain a view for later comparison, use `protocol-snapshot` with the same selection options; it creates cited immutable evidence rather than changing `protocol-map`'s read-only contract. `protocol-diff` compares two snapshot IDs with endpoint/method identity, name/status/provenance changes and completeness warnings. See [comparisons](comparisons.md); diff route identity deliberately differs from the exact redacted-URL grouping described below.
+
 ## Evidence selection
 
 Without `--evidence`, the command selects the newest relevant records, ordered by creation time and then database insertion order. Relevant kinds are `http_probe`, `har_exchange`, `search`, and `analysis` whose `data.tool` is `static_index`. HTTP records must also have the matching `data.source` (`live_probe` or `har_import`); inconsistent provenance is rejected rather than promoted to live evidence. It filters relevance **before** applying `--limit`, so newer checkpoints, task events, and other analysis records do not hide captures. One additional relevant record is fetched to detect a truncated window.

@@ -1,6 +1,7 @@
 """Exercise the actual CLI against disposable local HTTP and task fixtures."""
 
 import argparse
+import hashlib
 import os
 import json
 from pathlib import Path
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zipfile
 
 from demo_server import DemoServer
 
@@ -31,7 +33,7 @@ def invoke(cli, project, *arguments, expected_exit=0, env=None):
 
 
 def run(cli, transport):
-    with tempfile.TemporaryDirectory(prefix="forge-demo-") as directory, DemoServer(0) as server:
+    with tempfile.TemporaryDirectory(prefix="forge-fixture-") as directory, DemoServer(0) as server:
         project = Path(directory)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -112,14 +114,55 @@ def run(cli, transport):
             require(indexed["id"] in map_citations and all(item["id"] in map_citations for item in captured["exchanges"]),
                     "Protocol map lost capture/source citations")
 
+            before_snapshot = invoke(cli, project, "protocol-snapshot", "--evidence", captured["exchanges"][1]["id"])
+            revised_har = json.loads(json.dumps(har))
+            revised_har["log"]["entries"][1]["response"]["status"] = 202
+            revised_har["log"]["entries"][1]["response"]["content"]["text"] = json.dumps({"message": "PROFILE_READY", "quota_remaining": 7})
+            (project / "revision.har").write_text(json.dumps(revised_har), encoding="utf-8")
+            revision = invoke(cli, project, "har-import", "revision.har")
+            after_snapshot = invoke(cli, project, "protocol-snapshot", "--evidence", revision["exchanges"][1]["id"])
+            protocol_changes = invoke(cli, project, "protocol-diff", "--before", before_snapshot["id"], "--after", after_snapshot["id"])
+            profile_change = next(item for item in protocol_changes["data"]["changed"] if item["identity"]["method"] == "GET")
+            require(profile_change["changes"]["response_status"] == {"before": [200], "after": [202]}
+                    and "/quota_remaining" in profile_change["changes"]["response_body.json_field_paths"]["after"],
+                    "Cited capture comparison lost field/status changes")
+            require(not protocol_changes["data"]["authentication_verified"], "Capture diff claimed authentication")
+
+            client_versions = []
+            for version, endpoint in [("1.0", "/login"), ("2.0", "/profile")]:
+                archive_path = project / ("client-" + version + ".zip")
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("routes.js", 'const endpoint = "' + base + endpoint + '";\n')
+                    archive.writestr("old.js" if version == "1.0" else "new.js", "const revision = true;\n")
+                artifact = invoke(cli, project, "artifact-add", archive_path.name, "--version", version)
+                version_index = invoke(cli, project, "artifact-index", artifact["data"]["path"])
+                archive_path.unlink()
+                client_versions.append((artifact, version_index))
+            client_changes = invoke(cli, project, "client-diff", "--before", client_versions[0][0]["id"],
+                                    "--after", client_versions[1][0]["id"], "--before-index", client_versions[0][1]["id"],
+                                    "--after-index", client_versions[1][1]["id"])
+            require([item["file"] for item in client_changes["data"]["files"]["added"]] == ["new.js"]
+                    and [item["file"] for item in client_changes["data"]["files"]["removed"]] == ["old.js"]
+                    and [item["file"] for item in client_changes["data"]["files"]["changed"]] == ["routes.js"],
+                    "Stored client-version comparison lost byte inventory changes")
+            require(not client_changes["data"]["server_changes_verified"], "Static client diff claimed server changes")
+
+            document = 'query OwnedProfile($id: ID!) { viewer(id: $id) { id plan } }\nmutation OwnedMutation { update(value: "privateGraphQLLiteral91") { ok } }\n'
+            (project / "owned.graphql").write_text(document, encoding="utf-8")
+            graphql = invoke(cli, project, "graphql-analyze", "owned.graphql")
+            operations = graphql["data"]["documents"][0]["operations"]
+            require([operation["name"] for operation in operations] == ["OwnedProfile", "OwnedMutation"]
+                    and operations[0]["variables"][0]["type"] == "ID!"
+                    and "privateGraphQLLiteral91" not in json.dumps(graphql), "GraphQL analysis lost structure or copied values")
+
             (project / "target_impl.py").write_bytes((ROOT / "examples/demo_checker.py").read_bytes())
-            implementation = {"command": ["${FORGE_DEMO_PYTHON}", "target_impl.py"], "files": ["target_impl.py"],
-                              "context": {"client": "fixture-client", "egress": "loopback"},
+            implementation = {"command": ["${FORGE_DEMO_PYTHON}", "target_impl.py", "--stdin-json"], "files": ["target_impl.py"],
+                              "version_argv": ["--version"], "context": {"client": "fixture-client", "egress": "loopback"},
                               "controls": [
-                                  {"name": "positive", "args": ["--url", "${FORGE_DEMO_URL}", "--login", "demo",
-                                                               "--password", "${FORGE_DEMO_POSITIVE}"], "expected_bucket": "HIT"},
-                                  {"name": "negative", "args": ["--url", "${FORGE_DEMO_URL}", "--login", "demo",
-                                                               "--password", "${FORGE_DEMO_NEGATIVE}"], "expected_bucket": "FAIL"}]}
+                                  {"name": "positive", "args": [], "stdin_json": {"url": "${FORGE_DEMO_URL}", "login": "demo",
+                                   "password": "${FORGE_DEMO_POSITIVE}"}, "expected_bucket": "HIT"},
+                                  {"name": "negative", "args": [], "stdin_json": {"url": "${FORGE_DEMO_URL}", "login": "demo",
+                                   "password": "${FORGE_DEMO_NEGATIVE}"}, "expected_bucket": "FAIL"}]}
             (project / "implementation.json").write_text(json.dumps(implementation), encoding="utf-8")
             environment.update(FORGE_DEMO_PYTHON=sys.executable, FORGE_DEMO_URL=base,
                                FORGE_DEMO_POSITIVE="demo-password", FORGE_DEMO_NEGATIVE="wrong-demo-password")
@@ -129,8 +172,25 @@ def run(cli, transport):
             run_ids = {item["data"]["control"]: item["id"] for item in executed["runs"]}
             checked = invoke(cli, project, "verify-target", "--positive", run_ids["positive"], "--negative", run_ids["negative"])
             require(checked["data"]["passed"], "Saved target controls failed current-source verification")
+            runtime_hash = hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
+            require(executed["version"]["exit_code"] == 0 and executed["version"]["error"] is None
+                    and executed["version"]["stdout"].strip() == "Python " + ".".join(map(str, sys.version_info[:3]))
+                    and all(item["data"]["runtime_before"]["sha256"] == runtime_hash for item in executed["runs"]),
+                    "Target executable/version fingerprint was not observed")
+            shared = invoke(cli, project, "bundle", "--evidence", checked["id"], "--evidence", protocol_changes["id"],
+                            "--evidence", client_changes["id"], "--evidence", graphql["id"], "--output", "handoff.zip")
+            with zipfile.ZipFile(project / "handoff.zip") as archive:
+                manifest = json.loads(archive.read("manifest.json"))
+                exported_members = {name: archive.read(name) for name in archive.namelist()}
+                for fact in manifest["members"]:
+                    require(hashlib.sha256(exported_members[fact["name"]]).hexdigest() == fact["sha256"], "Handoff member hash mismatch")
+                packed = b"\n".join(exported_members.values())
+                require(b"demo-password" not in packed and b"privateGraphQLLiteral91" not in packed,
+                        "Handoff bundle copied private control/document values")
+            require(shared["manifest"]["closure_complete"] and not manifest["raw_materials_included"],
+                    "Handoff falsely declared incomplete citations or raw material disclosure")
             with (project / "target_impl.py").open("a", encoding="utf-8") as output:
-                output.write("\\n# owned smoke revision\\n")
+                output.write("\n# owned smoke revision\n")
             changed_target = invoke(cli, project, "verify-target", "--positive", run_ids["positive"],
                                     "--negative", run_ids["negative"], expected_exit=2)
             require(not changed_target["ok"], "Changed implementation remained verified")
@@ -173,7 +233,9 @@ def run(cli, transport):
                     "stale_rejected": True, "file_integrity": integrity, "history_states": states,
                     "historical_resume": True, "no_issued_secret_in_store": True,
                     "har_flow": ["HIT", "HIT"], "protocol_categories": sorted(categories),
-                    "target_controls": True, "changed_target_rejected": True}
+                    "target_controls": True, "changed_target_rejected": True,
+                    "stdin_controls": True, "runtime_fingerprinted": True, "cited_protocol_diff": True,
+                    "client_version_diff": True, "graphql_values_withheld": True, "handoff_hashes_verified": True}
         finally:
             server.shutdown()
             thread.join(timeout=5)

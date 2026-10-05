@@ -36,9 +36,11 @@ Artifact import/download options: `--version`, `--platform`, `--sha256`, `--max-
 
 Index/search reader limits: `--max-file-bytes`, `--max-total-bytes`, `--max-entries`, `--max-records`, `--min-string-length`. Index adds `--max-index-bytes`. Search accepts one or more explicitly scoped paths, `--regex`, `--ignore-case`, `--max-matches`.
 
-Index/search output includes source locations and truncation/skip facts. ZIP members are read without extracting their paths. Gzip indexing is bounded and marks offsets as decompressed-space locations. The bounded ZIP reader does not support ZIP64 or multi-disk archives. Directory indexing excludes known account/proxy/key data, results and dependency/cache directories.
+Index/search output includes source locations and truncation/skip facts. New static indexes record creation-time JSONL SHA-256 and size. ZIP members are read without extracting their paths. Gzip indexing is bounded and marks offsets as decompressed-space locations. The bounded ZIP reader does not support ZIP64 or multi-disk archives. Directory indexing excludes known account/proxy/key data, results and dependency/cache directories.
 
 `jadx PATH` requires installed JADX and Java. Options: `--timeout`, `--jobs` (default 2), `--max-log-bytes`. Output/log/evidence remain in the target. Explicit input and output containment rules apply; no universal signing or endpoint extraction is inferred from strings.
+
+`client-diff --before ID --after ID` compares stored artifacts or static indexes. Pair artifacts with `--before-index/--after-index`, or indexes with `--before-artifact/--after-artifact`; pairing must reference the stored blob. Index-only hashes identify redacted projections, not original file bytes. `graphql-analyze [SOURCE] --evidence ID` (repeatable) parses explicit source/request observations, exports structural names/positions and withholds literals; no introspection or traffic. See [comparisons](comparisons.md) and [GraphQL](graphql.md) for limits and provenance.
 
 ## HTTP
 
@@ -64,9 +66,9 @@ forge --project target run-target target-controls.json --timeout 30 --max-output
 forge --project target verify-target --positive "<positive-target-run-id>" --negative "<negative-target-run-id>"
 ```
 
-The spec declares one argv command, source files, client/egress context, a bucket selector and exactly one positive/negative control. No shell is used. Timeout is per control (finite, >0, at most 3600 seconds); output cap is combined retained stdout/stderr per control (1 byte..16 MiB). Deadlines include inherited pipe EOF; timeout cleanup targets the process tree/group.
+The spec declares one argv command, source files, client/egress context, a bucket selector and exactly one positive/negative control. Per-control `stdin_json` resolves bounded JSON privately and delivers it concurrently; absent input preserves closed stdin. Optional `version_argv` is explicitly supplied for the resolved executable. No shell is used. Timeout is per control (finite, >0, at most 3600 seconds); output cap is combined retained stdout/stderr (1 byte..16 MiB). Deadlines include inherited pipes/input delivery and process-tree cleanup.
 
-Controls need complete stdout JSON, the expected HIT/FREE or FAIL bucket, exit zero, no reported error, no truncation/timeout and unchanged listed sources. `TERMINAL` stops later controls. Results contain `runs`, `passed`, `verification`, `stopped`, `stop_reason`, `requested` and `completed`. `verify-target` requires distinct, same-invocation runs and hashes the current sources again. It rejects stale or failed controls. See [target controls](target-runs.md) for schema and privacy limits. Trusted programs retain your permissions and environment access; this is not a sandbox.
+Complete stdout JSON may report HIT/FREE/FAIL/TERMINAL/RETRY/ERROR/BADFORMAT/CUSTOM/RISK. Only expected positive HIT/FREE or negative FAIL with exit zero, no reported error/truncation/timeout and unchanged sources/executable can pass. TERMINAL stops later controls; no retries. Results expose `runs`, `passed`, `verification`, `stopped`, `stop_reason`, `requested`, `completed` and optional version facts. `verify-target` requires distinct same-invocation v2 runs and rehashes sources/executable; legacy records remain readable but need fresh execution for v2 verification. See [target controls](target-runs.md). This is not a sandbox.
 
 ## Protocol map
 
@@ -76,6 +78,8 @@ forge --project target protocol-map --evidence "<capture-id>" --evidence "<live-
 ```
 
 Read-only metadata summary of relevant static indexes/searches, HAR exchanges and live probes. Explicit IDs take precedence over the newest-record window. Bounds: `--limit` 1..1000, `--max-endpoints` 1..5000. Output preserves citations and distinct provenance categories, reports sampling/truncation, and never promotes imported/static evidence to live authentication. No raw-file scanning or network calls. See [protocol map](protocol-map.md).
+
+`protocol-snapshot` accepts the same selection/bounds and stores an immutable cited map. `protocol-diff --before SNAPSHOT_ID --after SNAPSHOT_ID` compares endpoint/method identities, field/header names, statuses, selector metadata and provenance with explicit omissions/ambiguities. Query/fragment values are not identity dimensions; static method-unknown candidates remain separate. Neither a missing observation nor a changed field proves a server change. See [comparisons](comparisons.md).
 
 ## Runtime
 
@@ -89,9 +93,9 @@ forge --project target native imports client.exe
 ```
 
 - `doctor` reports dependencies; it does not install them or verify device/login success.
-- `adb` actions: `devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`. Options: serial/path/package/component/lines/timeout. APK install is not split-APK-aware. Screenshot stores a PNG blob that may contain private on-screen content.
+- `adb` actions: `devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`; existing single-APK behavior is unchanged. `adb-preflight` adds actual authorized-device OS/API/ABI observations. `adb-install-splits` accepts repeatable `--apk`, or `--archive` with repeatable exact `--member`, optional `--serial` and bounded timeout; compiled manifests, package/version/dependencies and compatibility are checked before new-install-only dispatch. No hardware means no install proof. See [Android](android.md).
 - `frida` requires package/script; optional `--device`, `--attach`, `--duration`. The supplied hook and target setup are the investigator's responsibility.
-- `native` actions: `imports`, `exports`, `strings`, `functions`; accepts a binary and timeout. Function analysis invokes radare2 analysis.
+- `native` actions: `imports`, `exports`, `strings`, `functions`, `disasm`, `xrefs`, `callgraph`. Deep actions add `--address`, `--max-output` and `--max-items` with strict project input and bounded backend results; observed function/basic-block membership supports graph edges, unresolved memberships stay labeled. No decompiler/source-recovery guarantee. See [native](native.md).
 
 See [toolchain setup](toolchain.md) for overrides and platform/device prerequisites. Portable candidates must suit the host; on POSIX Windows launchers are skipped and local executables need execution permission.
 
@@ -110,3 +114,5 @@ Claims support `OBSERVED`, `INFERRED`, `UNKNOWN`, `CONTRADICTED`; OBSERVED needs
 The protocol file must be a nonempty JSON object with an `evidence` array of real IDs. `verify` requires distinct live HIT/FREE and FAIL exchanges, complete responses, identical method/URL/transport and matching declared client/egress. It does not independently measure those identifiers or execute a target checker.
 
 `report` creates a new Markdown note rather than overwriting a previous one. Inspect it before sharing; original artifact blobs and screenshots are outside the database's redaction boundary.
+
+`bundle --evidence ID --output NEW_ZIP` follows bounded citation closure and exports metadata projections with member/ZIP hashes. Repeat `--evidence`; options `--limit`, `--max-bytes`, `--max-record-bytes`. Default excludes bodies/streams/argv/stdin/paths/blobs/screenshots and free-text findings. `--include-findings` explicitly includes reviewed scrubbed claim prose; it cannot discover every unlabelled secret. Closure completeness and projection loss are separate. See [bundles](bundles.md).

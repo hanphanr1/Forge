@@ -10,7 +10,7 @@ FORGE imports client artifacts, indexes source-located strings, captures explici
 
 Use it directly or from a coding agent with shell access. FORGE does not call a model, require a model API key, or register an MCP server. Your agent still reads request builders, chooses experiments, and writes the target implementation.
 
-[CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [HAR templates](docs/har-flows.md) · [Target controls](docs/target-runs.md) · [Protocol map](docs/protocol-map.md) · [Task handoff](docs/checkpoints.md) · [Contributing](CONTRIBUTING.md)
+[CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [HAR templates](docs/har-flows.md) · [Target controls](docs/target-runs.md) · [Comparisons](docs/comparisons.md) · [GraphQL](docs/graphql.md) · [Native](docs/native.md) · [Android](docs/android.md) · [Bundles](docs/bundles.md) · [Task handoff](docs/checkpoints.md)
 
 ## The workflow
 
@@ -137,9 +137,22 @@ forge --project investigation verify-target --positive "<positive-target-run-id>
 
 HAR conversion writes editable request templates and source/output hashes without sending traffic or copying captured URL/header/string values. Fill the returned environment variables and add only selectors/rules supported by observed protocol evidence. See [HAR templates](docs/har-flows.md).
 
-`run-target` executes trusted project code for two explicit controls with bounded stdout/stderr, process deadlines and source hashes. Exit zero alone cannot pass. `verify-target` checks the distinct runs and current source hashes. Buckets are reported by that program, not independent attestation of authentication or IP. See [target controls](docs/target-runs.md).
+`run-target` executes trusted project code for two explicit controls with bounded stdout/stderr, process deadlines, source hashes and actual executable fingerprints. Optional `stdin_json` keeps credentials out of argv; optional declared `version_argv` records a bounded version probe. All standard buckets remain visible, but only expected HIT/FREE and FAIL controls can pass. `verify-target` rechecks sources and executable bytes. The program reports its bucket; FORGE does not independently attest authentication or IP. See [target controls](docs/target-runs.md).
 
 `protocol-map` summarizes stored URLs, methods, header/field names and source citations. Static candidates, imported captures and live HTTP observations stay separate; it neither opens raw captures nor probes endpoints. See [protocol map](docs/protocol-map.md).
+
+## Compare versions and hand off evidence
+
+```sh
+forge --project investigation protocol-snapshot --evidence "<observed-exchange-id>"
+forge --project investigation protocol-diff --before "<snapshot-id>" --after "<snapshot-id>"
+forge --project investigation client-diff --before "<artifact-or-index-id>" --after "<artifact-or-index-id>"
+forge --project investigation graphql-analyze client.graphql
+forge --project investigation bundle --evidence "<finding-or-verification-id>" --output handoff/review.zip
+```
+
+Protocol snapshots retain citations and omission flags; their diffs distinguish field/status/provenance changes from server claims. Client comparisons inspect stored artifact bytes or explicitly labeled redacted-index projections. GraphQL analysis extracts operations, variables, fields and fragments without exporting literals or contacting a schema endpoint. Bundles follow bounded citation closure and withhold capture payloads, process streams, paths, blobs and free-text findings by default. Review metadata before disclosure. See [comparisons](docs/comparisons.md), [GraphQL](docs/graphql.md) and [bundles](docs/bundles.md).
+
 
 ## What is included
 
@@ -147,11 +160,12 @@ HAR conversion writes editable request templates and source/output hashes withou
 |---|---|---|
 | Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
 | Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search` | Bounded readers; strings are candidates, not live protocol proof |
-| Runtime | `jadx`, `native`, `adb`, `frida`, `doctor` | Uses installed tools and configured devices |
+| Runtime | `jadx`, `native`, `adb`, `adb-preflight`, `adb-install-splits`, `frida`, `doctor` | Actual installed tools; split selection and compatible authorized hardware are explicit |
 | HTTP | `probe`, `probe-run`, `har-import`, `har-to-flow`, `diff` | Explicit requests and editable capture templates; no automatic retries or replay |
 | Implementation | `run-target`, `verify-target` | Trusted-code execution and declared controls; not a sandbox or independent authentication proof |
-| Protocol map | `protocol-map` | Cited metadata view; static strings and imported HAR do not become live proof |
-| Evidence | `claim`, `evidence`, `show`, `verify`, `report` | Citations and a narrow live-control gate |
+| Protocol | `protocol-map`, `protocol-snapshot`, `protocol-diff`, `graphql-analyze` | Cited provenance and local structural analysis, not schema/authentication inference |
+| Client versions | `client-diff` | Stored artifact bytes or labeled index-projection differences, not server-change proof |
+| Evidence | `claim`, `evidence`, `show`, `verify`, `report`, `bundle` | Scoped gates and explicit lossy metadata handoffs |
 
 Artifacts keep SHA-256, origin and source locations. HTTP rules classify observed response bodies rather than guessing from a status code. The first matching rule wins; an unmatched response is `UNKNOWN`. `TERMINAL` stops deterministic refusals instead of retrying them.
 
@@ -166,7 +180,7 @@ Install only what the investigation needs:
 
 Tool discovery checks an explicit `FORGE_*` override, a portable tool directory beside the source modules, then `PATH`. A broken override fails rather than selecting a different executable. `doctor` reports the actual resolution. See [toolchain setup](docs/toolchain.md).
 
-Android requires an authorized device or an environment you have deliberately configured. FORGE does not install an emulator. Host-side Frida does not provide device-side injection by itself. This Windows-oriented runtime collection has no iOS adapter.
+Android requires an authorized device or an environment you have deliberately configured. `adb-preflight` observes serial/OS/API/ABI and classifies missing prerequisites. `adb-install-splits` validates explicitly selected APKs/APKS/XAPK members and uses new-install-only dispatch; it does not replace apps or grant permissions. Deep native actions expose bounded disassembly, xrefs and function-level call-reference graphs backed by observed radare2 data. Neither path downloads SDKs, changes device security or supplies an iOS adapter. See [Android](docs/android.md) and [native analysis](docs/native.md).
 
 ## Evidence and privacy
 
@@ -193,7 +207,7 @@ python examples/smoke.py
 python examples/smoke.py --transport curl_cffi
 ```
 
-CI runs the regression suite and the local HTTP demo on Windows, Linux and macOS, including HAR conversion/reviewed replay, actual implementation controls, changed-source rejection and mixed-source protocol maps, then builds and exercises the installed wheel. Runtime/device checks still require their actual dependencies and hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change and release procedure.
+CI runs the regression suite and actual CLI smoke on Windows, Linux and macOS: reviewed HAR replay, JSON-stdin implementation controls, executable/version fingerprints, changed-source rejection, cited protocol/client diffs, GraphQL value exclusion and bundle member hashes. It then builds and exercises the installed wheel. Native/device checks require their actual dependencies and hardware; parser/dispatch fixtures are not installation proof. See [CONTRIBUTING.md](CONTRIBUTING.md) for the change and release procedure.
 
 ## Author and license
 

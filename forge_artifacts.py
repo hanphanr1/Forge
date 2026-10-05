@@ -481,15 +481,20 @@ def artifact_index(args, store):
     candidates = []
     written = 0
     saved_records = 0
+    index_hash = hashlib.sha256()
+    index_size = 0
     try:
         with temp.open("x", encoding="utf-8", newline="\n") as handle:
             for record in _scan([path], store, budget):
                 serialized = json.dumps(record, ensure_ascii=True) + "\n"
-                written += len(serialized.encode("utf-8"))
+                encoded = serialized.encode("utf-8")
+                written += len(encoded)
                 if written > args.max_index_bytes:
                     budget.skip(str(path), "reached --max-index-bytes")
                     break
                 handle.write(serialized)
+                index_hash.update(encoded)
+                index_size += len(encoded)
                 saved_records += 1
                 for candidate in _candidates(record):
                     if len(candidates) < 100:
@@ -505,6 +510,7 @@ def artifact_index(args, store):
             output_dir.rmdir()
     return store.add("analysis", {
         "tool": "static_index", "input": _relative(store, path), "path": _relative(store, output),
+        "index_sha256": index_hash.hexdigest(), "index_size": index_size,
         "records": saved_records, "entries": budget.entries, "bytes_read_budget": budget.bytes,
         "truncated": budget.truncated, "skipped": budget.skipped, "endpoint_candidates": candidates,
         "endpoint_note": "Candidates are observed strings, not verified live endpoints or authentication paths.",

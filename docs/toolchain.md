@@ -35,11 +35,13 @@ Keep publication URL, version, hash and applicable license in your own local ins
 
 1. Use a device available for the specific investigation. Name the app/package and capture before requesting connection.
 2. Enable Developer options and USB debugging, connect a data cable, unlock the device and approve the computer's RSA prompt.
-3. Run `forge --project target adb devices`. Observe `device`, `unauthorized`, `offline` or absence; resolve the actual state.
-4. Supply `--serial` if more than one authorized device exists. Observe OS version/ABI using the selected ADB executable before preparing device-side tools.
+3. Run `forge --project target adb-preflight`. Observe `ready`, `unauthorized`, `offline`, `multiple`, incomplete properties or absence; resolve the actual state. `adb devices` remains available for direct enumeration.
+4. Supply `--serial` when selection is ambiguous. Inspect observed OS/API/ABI before preparing device-side tools. For installation, `adb-install-splits` requires explicitly selected APKs or exact archive members with compatible manifests; it performs a new install, not replacement. See [Android](android.md).
 5. Configure the correct Frida server/Gadget/debuggable-app path for the target if a hook is required. ADB authorization alone does not provide injection.
 
 Do not root, unlock bootloaders, factory-reset or install certificates/profiles automatically. Do not assume that root/jailbreak, TLS capture or attestation bypass is available. No Android or iOS hardware result is implied by a host executable version check.
+
+Deep radare2 actions (`native disasm`, `native xrefs`, `native callgraph`) record bounded backend/version results and source-byte fingerprints. Function-level graph membership comes from observed function/basic-block data rather than guessed names or address spans. Static analysis never executes the binary or recovers source automatically. See [native analysis](native.md).
 
 ## iOS boundary
 

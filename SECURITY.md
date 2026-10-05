@@ -22,7 +22,13 @@ Headers are parsed by the selected transport; they are not a raw wire capture. l
 
 HAR conversion parameterizes captured URLs, headers and string body values but retains field/header names and some structural constants. Review generated templates before sharing. Captured signatures, binary bodies and wire encodings are not automatically reconstructed.
 
-`run-target` executes explicitly supplied trusted code without a shell; it is **not a sandbox**. Programs retain user permissions and inherited environment access and may write files or communicate externally. The output cap/deadline and redaction protect FORGE's captures, not the workstation from malicious code. Only listed sources are hashed; unlisted dependencies, interpreters and transient edits between hashes are not attested. Environment/argument/tagged values are scrubbed where known, but arbitrary transformations or unrelated inherited secrets can escape detection. Process-reported buckets and declared client/egress context are not independent authentication evidence.
+`run-target` executes explicitly supplied trusted code without a shell; it is **not a sandbox**. Programs retain user permissions and inherited environment access and may write files or communicate externally. Output/input caps, deadlines and redaction protect FORGE's captures, not the workstation from malicious code. Listed sources and the resolved executable are hashed; unlisted dependencies/libraries/environment and transient edits between observations are not attested. Declared executable identities are metadata, so use non-secret paths. Credentials in argv may be visible to OS process inspection; prefer supported JSON stdin. Known input/argument/environment/tagged values are scrubbed, but arbitrary transformations or unrelated inherited secrets can escape detection. Process-reported buckets and declared context are not independent authentication evidence.
+
+Protocol/client diffs and GraphQL analysis describe bounded source/capture observations. Names, URLs, hashes and citation metadata can be confidential; parsing, static references and successful HTTP status do not prove authentication. No GraphQL introspection or schema recovery is performed.
+
+`bundle` excludes raw payloads, argv/stdin, process streams, paths, blobs and free-text claims by default. Explicit `--include-findings` includes scrubbed author prose, which still requires review for opaque secrets or confidential content. Member/ZIP hashes identify unsigned bytes; citation closure does not make a lossy projection complete or approved for disclosure.
+
+Split installation uses explicitly selected, staged APK bytes and observed device compatibility. It does not request replacement/downgrade/permission grants or change device security. A timed-out installer can leave device state uncertain; do not retry blindly. Backend tools and Android's package installer remain independent trust/validation boundaries.
 
 ## External tools
 

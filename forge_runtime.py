@@ -132,6 +132,9 @@ def frida_hook(args, store):
 
 
 def native_inspect(args, store):
+    if args.action in {"disasm", "xrefs", "callgraph"}:
+        import forge_native
+        return forge_native.inspect(args, store)
     binary = _input_path(store, args.path)
     if not binary.is_file():
         raise ForgeError("Native artifact does not exist")
@@ -164,8 +167,11 @@ def register(subparsers):
     parser.add_argument("--attach", action="store_true")
     parser.add_argument("--duration", type=int, default=15)
     parser.set_defaults(handler=frida_hook)
-    parser = subparsers.add_parser("native", help="Inspect native imports, exports, strings or functions with radare2")
-    parser.add_argument("action", choices=["imports", "exports", "strings", "functions"])
+    parser = subparsers.add_parser("native", help="Inspect native metadata, disassembly, xrefs or call graphs with radare2")
+    parser.add_argument("action", choices=["imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph"])
     parser.add_argument("path")
     parser.add_argument("--timeout", type=float, default=120)
+    parser.add_argument("--address", help="Explicit unsigned decimal/hex address; no arbitrary radare2 commands")
+    parser.add_argument("--max-output", type=int, default=1048576, help="Combined retained bytes for deep native analysis")
+    parser.add_argument("--max-items", type=int, default=1000, help="Shared item cap for deep native analysis")
     parser.set_defaults(handler=native_inspect)
