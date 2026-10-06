@@ -124,6 +124,18 @@ def _zip_index(path):
         raise
 
 
+def _hash_file(path):
+    digest, size = hashlib.sha256(), 0
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            size += len(block)
+    return digest.hexdigest(), size
+
+
 def _copy_bounded(source, destination, limit=MAX_INPUT):
     digest, size = hashlib.sha256(), 0
     while True:
@@ -612,7 +624,86 @@ def adb_install_splits(args, store):
         raise ForgeError(f"{error}; rejection evidence {failure['id']}") from error
 
 
+def apk_info(args, store):
+    if bool(args.paths) == bool(args.archive):
+        raise ForgeError("Provide ordered APK paths OR one --archive with explicit --member selection")
+    if args.paths and args.member or args.archive and not args.member:
+        raise ForgeError("--member is required only with --archive; variant selection is never automatic")
+    selected = list(args.paths or args.member)
+    if not 1 <= len(selected) <= MAX_APKS:
+        raise ForgeError("Select between 1 and 128 APKs")
+    inputs = [_regular_path(store.root, value) for value in (args.paths or [args.archive])]
+    if len({os.path.normcase(str(path)) for path in inputs}) != len(inputs):
+        raise ForgeError("Duplicate input paths are not allowed")
+    if args.paths and any(path.suffix.lower() != ".apk" for path in inputs):
+        raise ForgeError("Explicit APK inputs must have .apk suffix")
+    if args.archive and inputs[0].suffix.lower() not in {".apks", ".xapk"}:
+        raise ForgeError("Archive must be an explicit .apks or .xapk file")
+    inspected, archive_hash = [], None
+    try:
+        with tempfile.TemporaryDirectory(prefix="forge-apk-info-") as temporary:
+            directory = Path(temporary)
+            if args.archive:
+                copied = directory / "source.zip"
+                with inputs[0].open("rb") as source, copied.open("wb") as target:
+                    archive_hash, _ = _copy_bounded(source, target)
+                with _zip_index(copied) as archive:
+                    names = [_member_name(name) for name in args.member]
+                    if len(set(name.casefold() for name in names)) != len(names):
+                        raise ForgeError("Duplicate selected members are not allowed")
+                    for name in names:
+                        if not name.lower().endswith(".apk"):
+                            raise ForgeError("Selected archive members must be APK files")
+                        try:
+                            entry = archive.getinfo(name)
+                        except KeyError:
+                            raise ForgeError(f"Selected APK member is absent: {name}") from None
+                        if entry.is_dir():
+                            raise ForgeError("Selected APK member is a directory")
+                        if entry.file_size > MAX_INPUT:
+                            raise ForgeError(f"Selected member exceeds the input byte cap: {name}")
+                        staged = directory / f"member-{len(inspected)}.apk"
+                        digest = hashlib.sha256()
+                        size = 0
+                        with archive.open(entry) as source, staged.open("xb") as target:
+                            while True:
+                                block = source.read(1024 * 1024)
+                                if not block:
+                                    break
+                                size += len(block)
+                                if size > MAX_INPUT:
+                                    raise ForgeError(f"Selected member exceeds the input byte cap: {name}")
+                                digest.update(block)
+                                target.write(block)
+                        metadata = inspect_apk(staged)
+                        inspected.append({"path": str(inputs[0]), "member": name, "sha256": digest.hexdigest(),
+                                          "size": size, "manifest": metadata})
+            else:
+                for path in inputs:
+                    digest, size = _hash_file(path)
+                    inspected.append({"path": str(path), "member": None, "sha256": digest, "size": size,
+                                      "manifest": inspect_apk(path)})
+    except (ForgeError, OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
+        failure = store.add("analysis", {"schema": SCHEMA, "tool": "android", "action": "apk-info", "success": False,
+                                         "error": str(error), "archive_sha256": archive_hash, "inputs": inspected})
+        raise ForgeError(f"{error}; rejection evidence {failure['id']}") from error
+    record = store.add("analysis", {"schema": SCHEMA, "tool": "android", "action": "apk-info", "success": True,
+                                    "archive_sha256": archive_hash, "inputs": inspected,
+                                    "scope": "Observed manifest metadata only; not an install, signature or "
+                                             "functionality check"})
+    if args.validate_selection:
+        validate_apks([item["manifest"] for item in inspected])
+    return record
+
+
 def register(subparsers):
+    parser = subparsers.add_parser("apk-info", help="Read compiled manifest metadata from explicit APKs or archive members")
+    parser.add_argument("paths", nargs="*", help="Ordered APK paths")
+    parser.add_argument("--archive", help="Explicit APKS/XAPK archive")
+    parser.add_argument("--member", action="append", default=[], help="Exact APK archive member; repeat in order")
+    parser.add_argument("--validate-selection", action="store_true",
+                        help="Also check the set as one installable split selection")
+    parser.set_defaults(handler=apk_info)
     parser = subparsers.add_parser("adb-preflight", help="Observe configured ADB and authorized device OS/API/ABI facts")
     parser.add_argument("--serial")
     parser.set_defaults(handler=adb_preflight)

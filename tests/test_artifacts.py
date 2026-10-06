@@ -1,9 +1,11 @@
 import argparse
 import gzip
+import io
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -90,6 +92,66 @@ class ArtifactBoundaryTests(unittest.TestCase):
             self.command("artifact-add", str(source), "--sha256", "0" * 64)
         self.assertEqual(source.read_bytes(), content)
         self.assertEqual(list((self.store.directory / "blobs").glob("*")) if (self.store.directory / "blobs").exists() else [], [])
+
+
+class JadxOutcomeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        self.store = EvidenceStore(self.root)
+        self.parser = argparse.ArgumentParser()
+        forge_artifacts.register(self.parser.add_subparsers())
+        self.source = self.root / "client.apk"
+        self.source.write_bytes(b"PK\x03\x04fixture")
+
+    def tearDown(self):
+        self.store.close()
+        self.temp.cleanup()
+
+    def run_jadx(self, returncode, produced, log="INFO - loading\n"):
+        def popen(command, **kwargs):
+            target = Path(command[command.index("-d") + 1])
+            target.mkdir(parents=True, exist_ok=True)
+            for index in range(produced):
+                (target / f"C{index}.java").write_text(f"class C{index} {{}}\n")
+            process = type("FakeProcess", (), {})()
+            process.stdout = io.BytesIO(log.encode())
+            process.pid = 4242
+            process.wait = lambda timeout=None: returncode
+            process.poll = lambda: returncode
+            process.kill = lambda: None
+            return process
+        tool = {"available": True, "path": str(self.source), "source": "fixture", "setup": ""}
+        args = self.parser.parse_args(["jadx", str(self.source)])
+        with patch.object(forge_artifacts, "find_tool", return_value=tool), \
+                patch.object(forge_artifacts.subprocess, "Popen", side_effect=popen):
+            return args.handler(args, self.store)
+
+    def test_partial_output_is_kept_and_counted(self):
+        record = self.run_jadx(1, 3, log="ERROR - finished with errors, count: 12\n")
+        data = record["data"]
+        self.assertEqual(data["status"], "partial")
+        self.assertEqual(data["java_files"], 3)
+        self.assertEqual(data["error_count"], 12)
+        self.assertTrue(data["partial"])
+        self.assertIsNone(data["error"])
+        self.assertIn("3 source files are still usable", data["warning"])
+        self.assertTrue((self.store.root / data["log_path"]).is_file())
+        self.assertEqual(len(list((self.store.root / data["output_path"]).glob("*.java"))), 3)
+
+    def test_failure_without_sources_is_still_an_error(self):
+        with self.assertRaisesRegex(ForgeError, "JADX failed"):
+            self.run_jadx(1, 0)
+        record = next(item for item in self.store.list() if item["data"].get("tool") == "jadx")
+        self.assertEqual(record["data"]["status"], "failed")
+        self.assertFalse(record["data"]["partial"])
+        self.assertIsNone(record["data"]["warning"])
+
+    def test_clean_run_reports_success(self):
+        record = self.run_jadx(0, 2)
+        self.assertEqual(record["data"]["status"], "success")
+        self.assertFalse(record["data"]["partial"])
+        self.assertIsNone(record["data"]["warning"])
 
 
 if __name__ == "__main__":

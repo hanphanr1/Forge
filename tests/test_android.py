@@ -1,5 +1,7 @@
 import argparse
+import hashlib
 import io
+import json
 from pathlib import Path
 import stat
 import struct
@@ -481,6 +483,71 @@ class CommandBehaviorTests(unittest.TestCase):
                 with patch.object(android, "executable", return_value="configured-adb"), patch.object(android, "_run", side_effect=incomplete):
                     with self.assertRaisesRegex(ForgeError, "installer failed"):
                         android.adb_install_splits(self.args, self.store)
+
+
+class ApkInfoTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name).resolve()
+        self.store = EvidenceStore(self.root)
+        self.base = self.root / "base.apk"
+        self.base.write_bytes(apk_bytes(manifest(split=None, minimum=23, extra='android:requiredSplitTypes="config.en"')))
+        self.split = self.root / "config.en.apk"
+        self.split.write_bytes(apk_bytes(manifest(split="config.en", minimum=23,
+                                                 extra='android:splitTypes="config.en"')))
+
+    def tearDown(self):
+        self.store.close()
+        self.temporary.cleanup()
+
+    def info(self, *paths, archive=None, members=(), validate=False):
+        args = argparse.Namespace(paths=list(paths), archive=archive, member=list(members),
+                                  validate_selection=validate)
+        return android.apk_info(args, self.store)
+
+    def test_reports_manifest_facts_without_installing_or_validating(self):
+        record = self.info(str(self.base))
+        item = record["data"]["inputs"][0]
+        self.assertEqual(item["manifest"]["package"], "org.forge.fixture")
+        self.assertEqual(item["manifest"]["min_sdk"], 23)
+        self.assertEqual(item["manifest"]["required_split_types"], ["config.en"])
+        self.assertEqual(item["sha256"], hashlib.sha256(self.base.read_bytes()).hexdigest())
+        self.assertEqual(record["data"]["action"], "apk-info")
+        self.assertEqual([record["data"]["inputs"][0]["member"]], [None])
+        self.assertNotIn("installer", record["data"])
+
+    def test_selection_validation_is_opt_in(self):
+        self.info(str(self.base))  # an incomplete split set must not be rejected by default
+        with self.assertRaisesRegex(ForgeError, "requiredSplitTypes"):
+            self.info(str(self.base), validate=True)
+        self.info(str(self.base), str(self.split), validate=True)
+
+    def test_explicit_apks_must_exist_and_keep_supplied_order(self):
+        with self.assertRaisesRegex(ForgeError, "Cannot access input"):
+            self.info(str(self.base), str(self.root / "absent.apk"))
+        record = self.info(str(self.split), str(self.base))
+        self.assertEqual([item["manifest"]["split"] for item in record["data"]["inputs"]], ["config.en", None])
+
+    def test_archive_members_require_exact_names_and_stay_bounded(self):
+        archive = self.root / "bundle.apks"
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("base.apk", apk_bytes(manifest(split=None, minimum=23)))
+            output.writestr("config.en.apk", apk_bytes(manifest(split="config.en", minimum=23)))
+            output.writestr("icon.png", b"\x89PNG")
+        record = self.info(archive=str(archive), members=["config.en.apk", "base.apk"])
+        self.assertEqual([item["member"] for item in record["data"]["inputs"]], ["config.en.apk", "base.apk"])
+        with self.assertRaisesRegex(ForgeError, "member is absent"):
+            self.info(archive=str(archive), members=["missing.apk"])
+        with self.assertRaisesRegex(ForgeError, "must be APK files"):
+            self.info(archive=str(archive), members=["icon.png"])
+        with self.assertRaisesRegex(ForgeError, "Unsafe ZIP member name"):
+            self.info(archive=str(archive), members=["../escape.js"])
+        with self.assertRaisesRegex(ForgeError, "Duplicate selected members"):
+            self.info(archive=str(archive), members=["base.apk", "base.apk"])
+        with self.assertRaisesRegex(ForgeError, "ordered APK paths OR one --archive"):
+            self.info(str(self.base), archive=str(archive), members=["base.apk"])
+        with self.assertRaisesRegex(ForgeError, "member is required only with --archive"):
+            self.info(archive=str(archive))
 
 
 if __name__ == "__main__":

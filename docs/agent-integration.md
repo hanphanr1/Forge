@@ -20,6 +20,8 @@ For captured traffic, use `har-to-flow` to create environment-backed templates, 
 
 Use JSON stdin for supported target controls, declare version probes explicitly and treat executable identity as metadata. Pin protocol snapshots around experiments; compare client artifacts/indexes and parse GraphQL only from explicit observed inputs. Deep native analysis stays static; ADB preflight is not install/injection proof. For cross-session disclosure, `bundle` exports explicit cited metadata with omissions and hashes, not credentials or automatic verification. Read the corresponding command docs before selecting bounds or device actions.
 
+For Android clients, `apk-info` triages candidate APKs before anything is installed or unpacked; `adb packages`/`adb package` locate the installed build and its code paths; `adb pull` copies one explicit artifact into a new project path for `jadx`/`search`/`native`. Expect `jadx` to report `status: partial` on obfuscated builds and continue with the saved sources instead of re-running. A pulled APK is a device observation, not a provenance-checked vendor release, and `frida` on Android needs a rooted device with `frida-server` or a repackaged Gadget.
+
 ## Keep data boundaries intact
 
 - Scope artifact/search/index operations to the target, not the entire workspace.
@@ -27,6 +29,7 @@ Use JSON stdin for supported target controls, declare version probes explicitly 
 - Supply credentials only in the authorized task. Prefer supported JSON stdin for implementation controls and environment substitution for HTTP; environment resolution into argv alone does not hide process command-line values.
 - Extract live flow tokens explicitly; do not replay redacted evidence or invent signing fields.
 - Ask for a physical device only when a concrete runtime experiment requires it. Do not install an emulator by default.
+- Pull only artifacts you are authorized to handle, into a new project path, and treat the result as sensitive: a device APK, database or screenshot can carry third-party or personal data. `adb push` writes to the device.
 - Inspect notes/captures before sending them to a remote model. Raw files and unknown unlabeled secrets may contain private data.
 
 A workflow rule guides the host. It does not prove the host followed it or that a vendor login worked.

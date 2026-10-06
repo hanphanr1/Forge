@@ -53,8 +53,9 @@ Use `claim` for a scoped observation or inference. Cite artifact/version/run evi
 
 `doctor` and adapters share discovery: explicit `FORGE_*` override, portable tools beside the source modules, then `PATH`. Broken overrides fail. See [toolchain setup](docs/toolchain.md).
 
-- ADB: explicit device actions plus `adb-preflight` OS/API/ABI observations and validated explicit `adb-install-splits` APK/APKS/XAPK selections.
-- Frida: an agent-written hook and a compatible configured target.
+- ADB: explicit device actions (`devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`, `pull`, `push`, `packages`, `package`) plus `adb-preflight` OS/API/ABI observations and validated explicit `adb-install-splits` APK/APKS/XAPK selections.
+- APK triage: `apk-info` for compiled manifest metadata of explicit APKs or exact archive members, before any install or unpack.
+- Frida: an agent-written hook and a compatible configured target. On Android, spawning a jailed (non-rooted) install needs a repackaged Gadget; otherwise the device needs a reachable `frida-server`. `frida-ps -U` listing a device is not proof that a hook can start.
 - Native: radare2 metadata, bounded disassembly/xrefs and observed function-level call-reference graphs with unresolved memberships visible.
 - Browser: the host's browser tooling, with HAR import when useful.
 
@@ -63,6 +64,8 @@ Finish reachable static/probe work before asking for hardware. Do not install an
 For user-assisted device work, name the platform/device, target app/package, experiment, settings required and planned interaction/capture. On Android, obtain USB debugging authorization and observe `adb devices` before selecting a serial. Distinguish absent, unauthorized and offline states. Read the actual OS version and ABI; do not invent a device profile or assume root.
 
 Ordinary ADB access is not proof of Frida injection. Explain root/server, Gadget or debuggable-app prerequisites for the actual target. Do not automatically root, unlock, factory-reset, jailbreak or install trust profiles/certificates.
+
+Android client reverse order that needs no root: `apk-info` the candidate APKs to learn package/version/minSdk/splits/ABIs, `adb packages` plus `adb package --package` to find the installed build and its `code_paths`/`splitNames`, `adb pull` that APK into a new project path, `jadx` it (partial output is usable and normal for obfuscated builds), `search` the decompiled sources for request builders and `native` declarations, then `native` the matching `lib/**/*.so` when the Java layer delegates to native code. Keep the base APK, each split APK and the pulled copy as separate cited artifacts; a pulled system APK is a device observation, not a provenance-checked vendor release.
 
 There is no iOS adapter in this collection. Identify an available compatible capture/debug environment and its pairing/signing prerequisites before requesting an iPhone connection. ADB does not support iOS. A trusted capture certificate does not automatically defeat pinning.
 

@@ -95,6 +95,17 @@ def _expected(value):
     return value.lower()
 
 
+def _count_java(root, cap=500000):
+    if not root.is_dir():
+        return 0
+    total = 0
+    for _ in root.rglob("*.java"):
+        total += 1
+        if total >= cap:
+            break
+    return total
+
+
 def _publish(temp, destination, expected_sha256=None, expected_size=None):
     # A same-filesystem hard link publishes complete bytes without overwriting an existing blob.
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -563,7 +574,12 @@ def jadx(args, store):
     environment = java_environment()
     output = _area(store, "analysis") / ("jadx-" + uuid.uuid4().hex)
     output.mkdir()
-    command = [launcher, "-d", str(output / "output"), "-j", str(args.jobs), str(source)]
+    command = [launcher, "-d", str(output / "output"), "-j", str(args.jobs)]
+    if args.deobf:
+        command.append("--deobf")
+    if args.single_class:
+        command += ["--single-class", args.single_class]
+    command.append(str(source))
     log = bytearray()
     log_size = 0
     read_errors = []
@@ -626,22 +642,35 @@ def jadx(args, store):
         error = str(exc)
     log_path = output / "jadx.log"
     log_temp = output / "jadx.log.tmp"
+    log_text = scrub_text(bytes(log).decode("utf-8", errors="replace"))
     try:
         with log_temp.open("x", encoding="utf-8") as handle:
-            handle.write(scrub_text(bytes(log).decode("utf-8", errors="replace")))
+            handle.write(log_text)
             handle.flush()
             os.fsync(handle.fileno())
         _publish(log_temp, log_path)
     finally:
         log_temp.unlink(missing_ok=True)
+    produced = _count_java(output / "output")
+    reported = re.search(r"finished with errors, count:\s*(\d+)", log_text)
+    error_count = int(reported.group(1)) if reported else None
+    if status == "failed" and produced:
+        status = "partial"
+    java_files = produced
+    warning = None
+    if status == "partial":
+        warning = (f"JADX reported {error_count if error_count is not None else 'some'} decompile errors; "
+                   f"{produced} source files are still usable at {_relative(store, output / 'output')}")
     evidence = store.add("analysis", {
         "tool": "jadx", "input": _relative(store, source), "status": status,
         "executable": launcher, "tool_source": tool["source"], "output_path": _relative(store, output / "output"),
         "log_path": _relative(store, log_path), "returncode": returncode,
-        "error": error, "log_truncated": log_size > args.max_log_bytes,
+        "error": error if status != "partial" else None, "warning": warning,
+        "log_truncated": log_size > args.max_log_bytes,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
+        "java_files": java_files, "error_count": error_count, "partial": status == "partial",
     })
-    if status != "success":
+    if status != "success" and status != "partial":
         raise ForgeError(f"JADX {status}: {scrub_text(error or 'see the JADX log for dependency or malformed-artifact errors')}. Log: {_relative(store, log_path)}. Evidence: {evidence['id']}")
     return evidence
 
@@ -694,5 +723,7 @@ def register(subparsers):
     parser.add_argument("path")
     parser.add_argument("--timeout", type=_seconds, default=300.0)
     parser.add_argument("--jobs", type=_positive, default=2)
+    parser.add_argument("--deobf", action="store_true", help="Ask JADX to deobfuscate names")
+    parser.add_argument("--single-class", help="Restrict output to one class name")
     parser.add_argument("--max-log-bytes", type=_positive, default=1024 * 1024)
     parser.set_defaults(handler=jadx)

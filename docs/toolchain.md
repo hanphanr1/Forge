@@ -36,8 +36,18 @@ Keep publication URL, version, hash and applicable license in your own local ins
 1. Use a device available for the specific investigation. Name the app/package and capture before requesting connection.
 2. Enable Developer options and USB debugging, connect a data cable, unlock the device and approve the computer's RSA prompt.
 3. Run `forge --project target adb-preflight`. Observe `authorized`, `unauthorized`, `offline`, `multiple`, incomplete properties or absence; resolve the actual state. `adb devices` remains available for direct enumeration.
-4. Supply `--serial` when selection is ambiguous. Inspect observed OS/API/ABI before preparing device-side tools. For installation, `adb-install-splits` requires explicitly selected APKs or exact archive members with compatible manifests; it performs a new install, not replacement. See [Android](android.md).
+4. Supply `--serial` when selection is ambiguous. Inspect observed OS/API/ABI before preparing device-side tools. Locate an installed app with `adb packages` + `adb package --package` and copy one artifact out with `adb pull --remote ... --path ...`. For installation, `adb-install-splits` requires explicitly selected APKs or exact archive members with compatible manifests; it performs a new install, not replacement. See [Android](android.md).
 5. Configure the correct Frida server/Gadget/debuggable-app path for the target if a hook is required. ADB authorization alone does not provide injection.
+
+### Frida on Android
+
+`forge frida` checks device reachability with `frida-ps` and classifies a refused spawn instead of reporting a generic failure:
+
+- **jailed (non-rooted) device** — spawning needs a matching `frida-gadget` inside a repackaged APK; a stock install cannot be spawned. Observed message: `need Gadget to attach on jailed Android`.
+- **no device-side server** — a rooted device still needs a reachable `frida-server` started on the device.
+- **launch refused** — check package name, `android:debuggable`, and signing.
+
+`frida-ps -U` can succeed even when spawning is impossible, so a listed device is not proof that a hook can start. Attaching to an already-running process (`--attach`) is a separate path with its own prerequisites.
 
 Do not root, unlock bootloaders, factory-reset or install certificates/profiles automatically. Do not assume that root/jailbreak, TLS capture or attestation bypass is available. No Android or iOS hardware result is implied by a host executable version check.
 

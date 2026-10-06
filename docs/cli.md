@@ -38,7 +38,7 @@ Index/search reader limits: `--max-file-bytes`, `--max-total-bytes`, `--max-entr
 
 Index/search output includes source locations and truncation/skip facts. New static indexes record creation-time JSONL SHA-256 and size. ZIP members are read without extracting their paths. Gzip indexing is bounded and marks offsets as decompressed-space locations. The bounded ZIP reader does not support ZIP64 or multi-disk archives. Directory indexing excludes known account/proxy/key data, results and dependency/cache directories.
 
-`jadx PATH` requires installed JADX and Java. Options: `--timeout`, `--jobs` (default 2), `--max-log-bytes`. Output/log/evidence remain in the target. Explicit input and output containment rules apply; no universal signing or endpoint extraction is inferred from strings.
+`jadx PATH` requires installed JADX and Java. Options: `--timeout`, `--jobs` (default 2), `--deobf`, `--single-class`, `--max-log-bytes`. Output/log/evidence remain in the target. Explicit input and output containment rules apply; no universal signing or endpoint extraction is inferred from strings. Real-world obfuscated APKs often finish with per-class decompile errors while still producing thousands of usable sources, so a nonzero exit with saved sources is recorded as `status: partial` (with `java_files` and `error_count`) and returned successfully; a run that produced no sources, or that timed out, still fails. Read `--single-class` or the saved output rather than re-running the whole APK.
 
 `client-diff --before ID --after ID` compares stored artifacts or static indexes. Pair artifacts with `--before-index/--after-index`, or indexes with `--before-artifact/--after-artifact`; pairing must reference the stored blob. Index-only hashes identify redacted projections, not original file bytes. `graphql-analyze [SOURCE] --evidence ID` (repeatable) parses explicit source/request observations, exports structural names/positions and withholds literals; no introspection or traffic. See [comparisons](comparisons.md) and [GraphQL](graphql.md) for limits and provenance.
 
@@ -85,7 +85,11 @@ Read-only metadata summary of relevant static indexes/searches, HAR exchanges an
 
 ```sh
 forge --project target doctor
+forge --project target apk-info client.apk
 forge --project target adb devices
+forge --project target adb packages --third-party --filter "<observed-name-part>"
+forge --project target adb package --serial "<observed-serial>" --package "<observed-package>"
+forge --project target adb pull --serial "<observed-serial>" --remote /data/local/tmp/sample.bin --path sample.bin
 forge --project target adb install --serial "<observed-serial>" --path client.apk
 forge --project target adb launch --serial "<observed-serial>" --package "<observed-package>" --component "<observed-package/activity>"
 forge --project target frida --package "<observed-package>" --script hook.js --duration 10
@@ -93,8 +97,9 @@ forge --project target native imports client.exe
 ```
 
 - `doctor` reports dependencies; it does not install them or verify device/login success.
-- `adb` actions: `devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`; existing single-APK behavior is unchanged. `adb-preflight` adds actual authorized-device OS/API/ABI observations. `adb-install-splits` accepts repeatable `--apk`, or `--archive` with repeatable exact `--member`, optional `--serial` and bounded timeout; compiled manifests, package/version/dependencies and compatibility are checked before new-install-only dispatch. No hardware means no install proof. See [Android](android.md).
-- `frida` requires package/script; optional `--device`, `--attach`, `--duration`. The supplied hook and target setup are the investigator's responsibility.
+- `apk-info` reads compiled manifest metadata (package, split, version code, minSdk, declared split dependencies/types, native ABIs) from explicit APK paths or exact archive members, without installing anything. Add `--validate-selection` to also check the set as one installable split selection.
+- `adb` actions: `devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`, `pull`, `push`, `packages`, `package`. `pull` copies one explicit absolute device file into the project (`--remote`, `--path`, `--max-bytes`) and refuses to overwrite; directories and traversal destinations are rejected. `push` copies one project file to an absolute device path. `packages` lists installed packages (`--third-party`, `--system`, `--filter`). `package` reports observed `pm path` results plus version/ABI/split facts from `dumpsys` (`--max-output`). `ui-tree` wakes the screen and retries once before failing, because `uiautomator` needs a quiescent foreground window. `adb-preflight` adds actual authorized-device OS/API/ABI observations. `adb-install-splits` accepts repeatable `--apk`, or `--archive` with repeatable exact `--member`, optional `--serial` and bounded timeout; compiled manifests, package/version/dependencies and compatibility are checked before new-install-only dispatch. No hardware means no install proof. See [Android](android.md).
+- `frida` requires package/script; optional `--device`, `--attach`, `--duration`. It first checks device reachability with `frida-ps` and classifies a refused spawn (jailed Android needs a repackaged Gadget; otherwise a reachable device-side `frida-server`). The supplied hook and target setup remain the investigator's responsibility.
 - `native` actions: `imports`, `exports`, `strings`, `functions`, `disasm`, `xrefs`, `callgraph`. Deep actions add `--address`, `--max-output` and `--max-items` with strict project input and bounded backend results; observed function/basic-block membership supports graph edges, unresolved memberships stay labeled. No decompiler/source-recovery guarantee. See [native](native.md).
 
 See [toolchain setup](toolchain.md) for overrides and platform/device prerequisites. Portable candidates must suit the host; on POSIX Windows launchers are skipped and local executables need execution permission.

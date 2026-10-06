@@ -160,7 +160,7 @@ Protocol snapshots retain citations and omission flags; their diffs distinguish 
 |---|---|---|
 | Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
 | Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search` | Bounded readers; strings are candidates, not live protocol proof |
-| Runtime | `jadx`, `native`, `adb`, `adb-preflight`, `adb-install-splits`, `frida`, `doctor` | Actual installed tools; split selection and compatible authorized hardware are explicit |
+| Runtime | `jadx`, `native`, `adb`, `adb-preflight`, `adb-install-splits`, `apk-info`, `frida`, `doctor` | Actual installed tools; split selection and compatible authorized hardware are explicit |
 | HTTP | `probe`, `probe-run`, `har-import`, `har-to-flow`, `diff` | Explicit requests and editable capture templates; no automatic retries or replay |
 | Implementation | `run-target`, `verify-target` | Trusted-code execution and declared controls; not a sandbox or independent authentication proof |
 | Protocol | `protocol-map`, `protocol-snapshot`, `protocol-diff`, `graphql-analyze` | Cited provenance and local structural analysis, not schema/authentication inference |
@@ -180,7 +180,7 @@ Install only what the investigation needs:
 
 Tool discovery checks an explicit `FORGE_*` override, a portable tool directory beside the source modules, then `PATH`. A broken override fails rather than selecting a different executable. `doctor` reports the actual resolution. See [toolchain setup](docs/toolchain.md).
 
-Android requires an authorized device or an environment you have deliberately configured. `adb-preflight` observes serial/OS/API/ABI and classifies missing prerequisites. `adb-install-splits` validates explicitly selected APKs/APKS/XAPK members and uses new-install-only dispatch; it does not replace apps or grant permissions. Deep native actions expose bounded disassembly, xrefs and function-level call-reference graphs backed by observed radare2 data. Neither path downloads SDKs, changes device security or supplies an iOS adapter. See [Android](docs/android.md) and [native analysis](docs/native.md).
+Android requires an authorized device or an environment you have deliberately configured. `apk-info` reads compiled manifest metadata from explicit APKs or exact archive members without installing. `adb-preflight` observes serial/OS/API/ABI and classifies missing prerequisites; `adb packages`/`adb package` locate an installed app and `adb pull`/`adb push` move one explicit artifact in or out of a new project-local path. `adb-install-splits` validates explicitly selected APKs/APKS/XAPK members and uses new-install-only dispatch; it does not replace apps or grant permissions. `jadx` keeps usable source when an obfuscated APK finishes with per-class errors. Deep native actions expose bounded disassembly, xrefs and function-level call-reference graphs backed by observed radare2 data. `frida` checks device reachability first and names the missing prerequisite: a jailed Android needs a repackaged Gadget, otherwise a reachable device-side `frida-server`. None of this downloads SDKs, changes device security or supplies an iOS adapter. See [Android](docs/android.md) and [native analysis](docs/native.md).
 
 ## Evidence and privacy
 

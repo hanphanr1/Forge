@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 - 2026-10-06
+
+- `jadx` keeps usable decompiled sources when an obfuscated APK finishes with per-class errors: a nonzero exit with saved sources is recorded as `status: partial` with `java_files` and `error_count` instead of being discarded. Added `--deobf` and `--single-class`.
+- New read-only `apk-info` command reporting compiled manifest metadata (package, split, version code, literal minSdk, declared split dependencies/types, native ABIs) from explicit APK paths or exact archive members, with opt-in `--validate-selection`.
+- New `adb pull`/`adb push` for one explicit artifact, restricted to absolute device paths and new project-local destinations, with byte caps, no overwrite and no partial file on failure.
+- New `adb packages` and `adb package` for installed-package discovery and observed `pm path`/`dumpsys` facts (version, ABI, split names) with bounded detail.
+- `adb ui-tree` wakes the screen and retries once, and names the quiescent-window limitation instead of failing on the first `could not get idle state`.
+- `adb devices` now records the same evidence shape (tool/action/serial/success/returncode) as other device actions.
+- `frida` checks device reachability with `frida-ps` and classifies a refused spawn: jailed Android needs a repackaged Gadget, otherwise a reachable device-side `frida-server`, or a launch/signing problem.
+- Bundle projections carry the new Android actions, the `partial` flag and `java_files`/`error_count`, and no longer drop generic jadx/frida lifecycle statuses.
+- Documentation and workflow now describe the no-root Android reverse order (triage → discover → pull → jadx → search → native) and the real Frida prerequisites.
+
 ## 0.3.0 - 2026-10-05
 
 - Preserve all standard target buckets while retaining narrow positive/negative passing gates and deterministic TERMINAL stop behavior.

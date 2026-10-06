@@ -30,6 +30,12 @@ Protocol/client diffs and GraphQL analysis describe bounded source/capture obser
 
 Split installation uses explicitly selected, staged APK bytes and observed device compatibility. It does not request replacement/downgrade/permission grants or change device security. A timed-out installer can leave device state uncertain; do not retry blindly. Backend tools and Android's package installer remain independent trust/validation boundaries.
 
+`adb pull` writes one explicitly named device file into a **new** project-local path, and `adb push` writes one project file to an absolute device path. Both are for artifacts you own or are authorized to handle: a pulled APK, database, preference file or screenshot can contain third-party or personal data, and a pushed file executes on the device only if something else starts it. FORGE refuses to overwrite an existing destination, rejects traversal/symlinked parents and leaves no partial file on failure, but it cannot judge whether the artifact is lawful to copy. Pulled bytes are stored unencrypted in the project; treat `.forge/` and the project as sensitive.
+
+`jadx` partial output is usable source, not verified vendor source. A local decompiler's naming, control flow and missing classes may differ from the real build, and a reported `error_count` means some classes are absent or wrong. A pulled system APK is a device observation, not a provenance-checked release; verify hashes against an official distribution when provenance matters.
+
+`apk-info` reads manifest metadata only. It does not verify APK signatures, membership in a signing lineage, or the authenticity of the declared package identity, and a declared `minSdkVersion`/split set is the manifest's claim rather than an installability guarantee.
+
 ## External tools
 
 JADX, ADB, Frida, radare2, Java and optional curl components have their own update and trust boundaries. Install from observed official sources, retain version/hash provenance locally and avoid running untrusted binaries on a sensitive workstation. FORGE does not bundle those tools or silently install an emulator.

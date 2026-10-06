@@ -15,6 +15,25 @@ The `runtime` evidence uses schema `forge.android.v1`. Its `status` distinguishe
 
 Device facts come from `ro.build.version.release`, `ro.build.version.sdk`, and `ro.product.cpu.abilist`. If the ABI-list property is empty, FORGE uses the actual `ro.product.cpu.abi` and `ro.product.cpu.abi2` values. Property call exits, bodies, and errors are retained. Preflight is **not** installation, application-launch, root, certificate, or injection proof.
 
+## Discover, pull and triage before installing anything
+
+```console
+forge apk-info ./owned/base.apk ./owned/config.arm64_v8a.apk
+forge apk-info --archive ./owned/application.xapk --member base.apk --member config.arm64_v8a.apk
+forge adb packages --third-party --filter "<observed-name-part>"
+forge adb package --serial OWNED_DEVICE_SERIAL --package com.example.app
+forge adb pull --serial OWNED_DEVICE_SERIAL --remote /data/local/tmp/sample.bin --path sample.bin
+forge adb push --serial OWNED_DEVICE_SERIAL --path ./hook.js --remote /data/local/tmp/hook.js
+```
+
+`apk-info` is a read-only metadata command. It reads compiled manifests from explicit APK paths or exact archive members and reports package, split name, combined version code, literal `minSdkVersion`, declared split dependencies/types and observed native ABIs. It does not install, unpack, or verify signatures. Add `--validate-selection` only when you also want the set judged as one installable split selection.
+
+`adb package` reports the observed `pm path` entries plus `versionName`, `versionCode`, `primaryCpuAbi` and `splitNames` parsed from `dumpsys package`. `dumpsys` output is a claimed system fact, not an independent verification, and retained detail is capped by `--max-output`.
+
+`adb pull` copies exactly one absolute device file into the project. The destination must be a new project-local path: existing files, traversal, and symlinked parent directories are rejected, and directories on the device are not copied. Retained bytes are capped by `--max-bytes` (default 256 MiB); an over-cap or failed pull leaves no partial file. `adb push` copies one regular project file to an absolute device path. Both actions are for artifacts you own or are authorized to handle.
+
+`adb ui-tree` wakes the screen and retries once. `uiautomator` still needs a quiescent foreground window, so an animated or locked screen can fail with an explicit `could not get idle state` error; unlock the device or stop animations and retry.
+
 ## Install a selected APK set
 
 Use only APKs you own or are authorized to install on the selected device. The package must not already be installed under this command's new-install policy.
