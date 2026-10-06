@@ -1,16 +1,48 @@
+<div align="center">
+
 # FORGE
 
-Local evidence and resumable workflows for protocol investigation.
+**Give the agent evidence, not screenshots.**
+
+</div>
 
 [![CI](https://github.com/hanphanr1/Forge/actions/workflows/ci.yml/badge.svg)](https://github.com/hanphanr1/Forge/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-555)](pyproject.toml)
 [![MIT License](https://img.shields.io/badge/License-MIT-555)](LICENSE)
+[![No model, no cloud](https://img.shields.io/badge/runs-100%25%20local-555)](docs/scope-and-retention.md)
 
-FORGE imports client artifacts, indexes source-located strings, captures explicit HTTP flows, and keeps findings in a target-local evidence store. Checkpoints preserve the next experiment across sessions. Response extraction carries tokens between requests without turning the evidence database into a credential store.
+FORGE is a local workbench for reverse-engineering protocol clients: Android, iOS, desktop and web. It imports the artifact, indexes source-located strings, drives the tools you already installed (JADX, radare2, ADB, Frida), probes real endpoints, and keeps every observation in a target-local evidence store. Checkpoints carry the next experiment across sessions. Response extraction moves tokens between requests without turning the evidence database into a credential store.
 
 Use it directly or from a coding agent with shell access. FORGE does not call a model, require a model API key, or register an MCP server. Your agent still reads request builders, chooses experiments, and writes the target implementation.
 
+What that buys the agent:
+
+- Every result is a record: input SHA-256, the exact command, observed stdout/stderr sizes, raw bytes and the limits of what was actually checked. Cite an evidence ID or leave the claim out.
+- Gaps stay visible. An unmatched response is `UNKNOWN`, a truncated output is flagged as truncated, and a field nobody observed never reaches the store.
+- Work resumes. `checkpoint` and `resume` return the saved state, cited findings, file-integrity hashes and next action, and every write carries an expected revision.
+- FORGE calls no model and needs no account. The whole store lives in `.forge/` inside the target folder.
+
 [CLI reference](docs/cli.md) · [Agent workflow](WORKFLOW.md) · [HTTP flows](docs/http-flows.md) · [HAR templates](docs/har-flows.md) · [Capture ingest](docs/capture-ingest.md) · [Target controls](docs/target-runs.md) · [Comparisons](docs/comparisons.md) · [GraphQL](docs/graphql.md) · [Native](docs/native.md) · [Android](docs/android.md) · [APK patching](docs/apk-patching.md) · [iOS boundary](docs/ios.md) · [Scope and retention](docs/scope-and-retention.md) · [Bundles](docs/bundles.md) · [Task handoff](docs/checkpoints.md)
+
+## See it work
+
+This runs on loopback with disposable fixture credentials. The first command starts the demo server; the second replays a two-request flow: log in, extract a token from the response, spend it with the session cookie.
+
+```sh
+python examples/demo_server.py
+forge --project . probe-run examples/login-flow.json
+```
+
+Below is a real run of that command, reformatted for width. The token and cookie are stored redacted, which is why the flow works without FORGE ever keeping a usable credential:
+
+```text
+ok: true    requested: 2    completed: 2    session_reused: true    stopped: false
+ev_b0e7a3c1a04a4d16a2ec8edf978b80f2   POST http://127.0.0.1:8765/login    200  {"message": "SIGNED_IN", "data": {"opaque": "[REDACTED]"}}
+ev_f41f38f76787487f8ddb661e0c4e272a   GET  http://127.0.0.1:8765/profile  200  {"message": "PROFILE_READY", "plan": "demo", "opaque_echo": "[REDACTED]"}
+cookie: [REDACTED]
+```
+
+Full walkthrough and the flow syntax: [Try a complete local flow](#try-a-complete-local-flow).
 
 ## The workflow
 
@@ -91,19 +123,7 @@ forge --project investigation resume
 
 ## Try a complete local flow
 
-The demo binds to loopback and uses disposable fixture credentials. It does not contact a vendor or accept production credentials.
-
-In one terminal:
-
-```sh
-python examples/demo_server.py
-```
-
-In another, from the repository root:
-
-```sh
-forge --project . probe-run examples/login-flow.json
-```
+The demo binds to loopback and uses disposable fixture credentials. It does not contact a vendor or accept production credentials. Run the two commands from [See it work](#see-it-work) in two terminals.
 
 The flow logs in, extracts a token from the JSON response, and sends it with the session cookie to the profile endpoint. Inspect the final exchange's `bucket` and the top-level `stopped` / `stop_reason`; `ok: true` alone does not mean an entire flow succeeded. Stop the demo server when finished.
 
