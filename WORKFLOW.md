@@ -56,7 +56,7 @@ Use `claim` for a scoped observation or inference. Cite artifact/version/run evi
 - ADB: explicit device actions (`devices`, `install`, `launch`, `stop`, `logcat`, `screenshot`, `ui-tree`, `pull`, `push`, `packages`, `package`) plus `adb-preflight` OS/API/ABI observations and validated explicit `adb-install-splits` APK/APKS/XAPK selections.
 - APK triage: `apk-info` for compiled manifest metadata of explicit APKs or exact archive members, before any install or unpack.
 - Frida: an agent-written hook and a compatible configured target. On Android, spawning a jailed (non-rooted) install needs a repackaged Gadget; otherwise the device needs a reachable `frida-server`. `frida-ps -U` listing a device is not proof that a hook can start.
-- Native: radare2 metadata, bounded disassembly/xrefs and observed function-level call-reference graphs with unresolved memberships visible.
+- Native: radare2 metadata, bounded disassembly/xrefs, register-level `pdc` pseudo-C and observed function-level call-reference graphs with unresolved memberships visible. `pdc` is a readable view of the disassembly, not recovered source.
 - Browser: the host's browser tooling, with HAR import when useful.
 
 Finish reachable static/probe work before asking for hardware. Do not install an emulator or system image unless the user explicitly requests that environment.

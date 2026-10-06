@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-10-07
+
+- New `native decompile` action: retains radare2 `pdc` output as bounded register-level pseudo-C in evidence, with `--address`/entrypoint selection like `disasm`.
+- Decompile keeps a usable partial view: output truncation and the `--max-items` line cap are recorded (`caps.pseudo_c_truncated`, `caps.items_omitted`, `caps.items_limit_reached`) instead of failing the run, while a backend error, timeout or non-zero exit still fails. Structured JSON actions keep failing on truncation.
+- Decompile evidence states the limit explicitly: `pdc` is a readable view of the disassembly, not recovered source, and FORGE bundles no real decompiler.
+- Bundle projections carry the `decompile` action plus `pseudo_c_lines`/`pseudo_c_truncated`; the pseudo-C text itself stays out of bundles by default.
+
 ## 0.5.0 - 2026-10-06
 
 - New APK patch loop: `apk-decode` (apktool into a new project directory, success requires the decoded manifest), `apk-manifest` (declared permissions, components with `android:exported`, intent filters and deeplinks from a decoded tree, a decoded manifest or a raw APK), `apk-rebuild` (unsigned bytes that stay unsigned), and `apk-sign` (zipalign, apksigner and a verification pass that must pass before any output is published).

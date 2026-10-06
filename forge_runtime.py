@@ -324,7 +324,7 @@ def frida_hook(args, store):
 
 
 def native_inspect(args, store):
-    if args.action in {"disasm", "xrefs", "callgraph"}:
+    if args.action in {"disasm", "xrefs", "callgraph", "decompile"}:
         import forge_native
         return forge_native.inspect(args, store)
     binary = _input_path(store, args.path)
@@ -367,7 +367,8 @@ def register(subparsers):
     parser.add_argument("--duration", type=int, default=15)
     parser.set_defaults(handler=frida_hook)
     parser = subparsers.add_parser("native", help="Inspect native metadata, disassembly, xrefs or call graphs with radare2")
-    parser.add_argument("action", choices=["imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph"])
+    parser.add_argument("action", choices=["imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph",
+                                           "decompile"])
     parser.add_argument("path")
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--address", help="Explicit unsigned decimal/hex address; no arbitrary radare2 commands")

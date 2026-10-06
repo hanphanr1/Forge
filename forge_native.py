@@ -25,6 +25,13 @@ _LIMITATIONS = [
 ]
 
 
+_DECOMPILE_LIMITATION = (
+    "`pdc` is register-level pseudo-C produced from the same disassembly, not recovered source: there are no "
+    "inferred variable names, structs or types, and control flow reflects backend analysis heuristics. Treat it "
+    "as a readable view of the disassembly, not as the program's original code."
+)
+
+
 def _address(value):
     if value is None:
         return None
@@ -40,7 +47,7 @@ def _address(value):
 
 
 def _parameters(args):
-    if args.action not in {"disasm", "xrefs", "callgraph"}:
+    if args.action not in {"disasm", "xrefs", "callgraph", "decompile"}:
         raise ForgeError("Unsupported native analysis action")
     address = _address(getattr(args, "address", None))
     timeout = args.timeout
@@ -260,7 +267,7 @@ def inspect(args, store):
     deadline = time.monotonic() + timeout
     retained = 0
 
-    def run(label, command=None):
+    def run(label, command=None, allow_truncated=False):
         nonlocal retained
         remaining = deadline - time.monotonic()
         budget = max_output - retained
@@ -276,7 +283,9 @@ def inspect(args, store):
                      retained_stdout_sha256=hashlib.sha256(capture["stdout"]).hexdigest())
         data["processes"].append(facts)
         data["caps"]["output_truncated"] |= capture["truncated"]
-        if capture["error"] or capture["timed_out"] or capture["exit_code"] != 0 or capture["truncated"]:
+        # Structured JSON is unusable when cut, so truncation fails there. A bounded text
+        # view such as pseudo-C stays useful as long as the cut is recorded.
+        if capture["error"] or capture["timed_out"] or capture["exit_code"] != 0 or (capture["truncated"] and not allow_truncated):
             raise ForgeError(f"radare2 {label} failed, timed out, or exceeded its capture cap")
         return capture["stdout"]
 
@@ -303,7 +312,19 @@ def inspect(args, store):
             address = entries[0]["vaddr"]
             data["parameters"].update(selected_address=address, address_source="first_backend_entrypoint")
         normalized = f"0x{address:x}" if address is not None else None
-        if args.action == "disasm":
+        if args.action == "decompile":
+            raw = run("decompile", f"aaa;pdc @ {normalized}", allow_truncated=True)
+            text = scrub_text(raw.decode("utf-8", "replace"))
+            lines = text.splitlines()
+            kept = lines[:max_items]
+            data["pseudo_c"] = "\n".join(kept)
+            data["pseudo_c_lines"] = len(kept)
+            data["caps"]["items_omitted"] += max(0, len(lines) - len(kept))
+            data["caps"]["items_limit_reached"] |= len(lines) > len(kept)
+            data["caps"]["pseudo_c_truncated"] = bool(data["caps"]["output_truncated"]) or len(lines) > len(kept)
+            data["parameters"]["decompiler"] = "radare2 pdc (register-level pseudo-C)"
+            data["limitations"] = _LIMITATIONS + [_DECOMPILE_LIMITATION]
+        elif args.action == "disasm":
             retain("instructions", _instructions(_json(run("disassembly", f"aaa;pdj {max_items} @ {normalized}"))))
         elif args.action == "xrefs":
             retain("xrefs", _xrefs(_json(run("incoming_xrefs", f"aaa;axtj @ {normalized}")), "incoming", address=address))

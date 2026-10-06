@@ -99,6 +99,49 @@ class NativeTests(unittest.TestCase):
         self.assertFalse(data["success"])
         self.assertTrue(data["binary_unchanged"])
 
+    def test_decompile_keeps_bounded_pseudo_c_and_records_the_cut(self):
+        pseudo = b"void entry0 (void) {\n    eax = 1\n    ebx = 2\n    ret\n}\n"
+        outputs = [self.capture(b"r2 unit fixture"), self.capture(pseudo, truncated=True)]
+        with patch.object(forge_native, "executable", return_value="r2"), patch.object(
+                forge_native, "_capture", side_effect=outputs) as capture:
+            record = forge_native.inspect(self.args(action="decompile", address="0x10", max_items=2), self.store)
+        data = record["data"]
+        self.assertTrue(data["success"], data["errors"])
+        self.assertEqual(capture.call_args_list[1].args[0][-2], "aaa;pdc @ 0x10")
+        self.assertEqual(data["pseudo_c_lines"], 2)
+        self.assertEqual(data["pseudo_c"], "void entry0 (void) {\n    eax = 1")
+        self.assertEqual(data["caps"]["items_omitted"], 3)
+        self.assertTrue(data["caps"]["items_limit_reached"])
+        # A cut text view stays usable, but the cut must be recorded, not hidden.
+        self.assertTrue(data["caps"]["pseudo_c_truncated"])
+        self.assertTrue(data["caps"]["output_truncated"])
+        self.assertEqual(data["parameters"]["decompiler"], "radare2 pdc (register-level pseudo-C)")
+        self.assertTrue(any("register-level" in item for item in data["limitations"]))
+        self.assertEqual(data["instructions"], [])
+
+    def test_decompile_resolves_the_entrypoint_and_reports_clean_text(self):
+        pseudo = b"void entry0 (void) {\n    ret\n}\n"
+        outputs = [self.capture(b"r2 unit fixture"), self.capture(b'[{"vaddr":4096,"paddr":64}]'), self.capture(pseudo)]
+        with patch.object(forge_native, "executable", return_value="r2"), patch.object(
+                forge_native, "_capture", side_effect=outputs) as capture:
+            data = forge_native.inspect(self.args(action="decompile", address=None), self.store)["data"]
+        self.assertEqual(data["parameters"]["selected_address"], 4096)
+        self.assertEqual(data["parameters"]["address_source"], "first_backend_entrypoint")
+        self.assertEqual(capture.call_args_list[2].args[0][-2], "aaa;pdc @ 0x1000")
+        self.assertEqual(data["pseudo_c_lines"], 3)
+        self.assertFalse(data["caps"]["pseudo_c_truncated"])
+        self.assertEqual(data["caps"]["items_omitted"], 0)
+
+    def test_decompile_still_fails_on_a_backend_error(self):
+        outputs = [self.capture(b"r2 unit fixture"), self.capture(b"", exit_code=1, error="boom")]
+        with patch.object(forge_native, "executable", return_value="r2"), patch.object(
+                forge_native, "_capture", side_effect=outputs):
+            with self.assertRaisesRegex(ForgeError, "decompile failed"):
+                forge_native.inspect(self.args(action="decompile", address="0x10"), self.store)
+        data = self.store.list(kind="analysis")[0]["data"]
+        self.assertFalse(data["success"])
+        self.assertTrue(data["binary_unchanged"])
+
     def test_xrefs_share_item_budget_and_keep_direction(self):
         row = b'[{"from":1,"to":16,"type":"CALL"},{"from":2,"to":16,"type":"DATA"}]'
         outputs = [self.capture(b"r2 unit fixture"), self.capture(row), self.capture(row)]
