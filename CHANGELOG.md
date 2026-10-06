@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0 - 2026-10-06
+
+- New APK patch loop: `apk-decode` (apktool into a new project directory, success requires the decoded manifest), `apk-manifest` (declared permissions, components with `android:exported`, intent filters and deeplinks from a decoded tree, a decoded manifest or a raw APK), `apk-rebuild` (unsigned bytes that stay unsigned), and `apk-sign` (zipalign, apksigner and a verification pass that must pass before any output is published).
+- Signing accepts an explicit project-local keystore with password environment variables, or `--debug-keystore` for a throwaway identity that is recorded as `debug_identity: true` and deleted afterwards. No signing identity is ever invented silently.
+- Tool discovery adds apktool, apksigner and zipalign, including selection of the newest numeric `build-tools/*/` under a caller-configured `ANDROID_HOME`/`ANDROID_SDK_ROOT`. `doctor` reports the resolved source.
+- New `capture-ingest`: a bounded loopback listener that accepts a pushed HAR document, entries array or single entry and stores each exchange through the same normalization as `har-import`, so pushed traffic stays `captured_http` and is never promoted to live proof. Optional token, per-reason rejection counters, no echoed request data.
+- New `websocket-analyze`: frames from HAR `_webSocketMessages`/`_webSocketFrames` or explicit `{"url","frames"}` documents, reported as direction, opcode/type counts, payload byte stats, close codes and JSON field-name paths only.
+- New `api-shape`: per-domain method/path identities, status distribution and request/response header, JSON field-path, form and query names from stored HTTP evidence. Names only, never values.
+- New `storage-report` and `evidence-prune`: read-only inventory, and opt-in deletion of unreferenced blobs or aged evidence with cited-evidence, audit-row and post-checkpoint protection plus a `maintenance` audit record.
+- `init` now records caller-declared scope: authorization status and basis, network profile, and in-scope/out-of-scope assets. A denied status blocks active steps and an `offline` profile blocks network and device steps; local analysis of already-obtained artifacts stays available. Stored keys avoid the credential-redaction words.
+- New `hook-evidence`: one claim carrying a hook evidence triple with a citation per part, an omitted state dependency recorded as `not-established`, and paired state arguments enforced.
+- New `ios-devices` and `ios-pair`: read-only observations from a configured `idevice_id`/`idevicepair`, with an explicit statement that FORGE has no iOS runtime adapter and no capture, hooking or injection capability.
+- Bundle projections carry the new APK, iOS, maintenance and scope fields and no longer drop the added action/tool/status values.
+
 ## 0.4.0 - 2026-10-06
 
 - `jadx` keeps usable decompiled sources when an obfuscated APK finishes with per-class errors: a nonzero exit with saved sources is recorded as `status: partial` with `java_files` and `error_count` instead of being discarded. Added `--deobf` and `--single-class`.

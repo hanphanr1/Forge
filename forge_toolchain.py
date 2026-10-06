@@ -1,4 +1,5 @@
 from pathlib import Path
+import glob
 import os
 import re
 import shutil
@@ -33,7 +34,57 @@ TOOLS = {
         "env": "FORGE_JAVA", "command": "java", "local": (),
         "setup": "JADX needs a supported Java runtime on PATH; FORGE_JAVA selects an explicit java executable",
     },
+    "apktool": {
+        "env": "FORGE_APKTOOL", "command": "apktool",
+        "local": ("apktool/apktool.bat", "apktool/apktool"),
+        "setup": "Install apktool in FORGE/tools/apktool (apktool.jar plus a launcher) or set FORGE_APKTOOL",
+    },
+    "apksigner": {
+        "env": "FORGE_APKSIGNER", "command": "apksigner",
+        "local": ("build-tools/apksigner.bat", "build-tools/apksigner"),
+        "sdk": ("build-tools/*/apksigner.bat", "build-tools/*/apksigner"),
+        "setup": "Install Android build-tools in FORGE/tools/build-tools, set ANDROID_HOME/ANDROID_SDK_ROOT, or set FORGE_APKSIGNER",
+    },
+    "zipalign": {
+        "env": "FORGE_ZIPALIGN", "command": "zipalign",
+        "local": ("build-tools/zipalign.exe", "build-tools/zipalign"),
+        "sdk": ("build-tools/*/zipalign.exe", "build-tools/*/zipalign"),
+        "setup": "Install Android build-tools in FORGE/tools/build-tools, set ANDROID_HOME/ANDROID_SDK_ROOT, or set FORGE_ZIPALIGN",
+    },
+    "idevice_id": {
+        "env": "FORGE_IDEVICE_ID", "command": "idevice_id", "local": (),
+        "setup": "Install libimobiledevice so idevice_id is on PATH, or set FORGE_IDEVICE_ID to an explicit executable",
+    },
+    "idevicepair": {
+        "env": "FORGE_IDEVICEPAIR", "command": "idevicepair", "local": (),
+        "setup": "Install libimobiledevice so idevicepair is on PATH, or set FORGE_IDEVICEPAIR to an explicit executable",
+    },
 }
+
+
+def _sdk_candidate(spec):
+    # A caller-configured Android SDK build-tools directory is a normal installation,
+    # never a bulk download: select the newest numeric version that exists.
+    patterns = spec.get("sdk")
+    if not patterns:
+        return None
+    for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        root = os.environ.get(variable)
+        if not root or not os.path.isdir(root):
+            continue
+        for pattern in (patterns if os.name == "nt" else tuple(reversed(patterns))):
+            if pattern.endswith(".exe") and os.name != "nt":
+                continue
+            matches = [path for path in glob.glob(os.path.join(root, pattern)) if os.path.isfile(path)]
+            if not matches:
+                continue
+            def version_key(path):
+                parts = re.findall(r"\d+", os.path.basename(os.path.dirname(path)))
+                return tuple(int(part) for part in (parts + ["0"] * 3)[:3])
+            chosen = max(matches, key=version_key)
+            if os.name == "nt" or os.access(chosen, os.X_OK):
+                return chosen
+    return None
 
 
 def find_tool(name):
@@ -50,6 +101,9 @@ def find_tool(name):
             continue
         if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
             return {"available": True, "path": str(candidate.resolve()), "source": "FORGE/tools", "setup": spec["setup"]}
+    sdk = _sdk_candidate(spec)
+    if sdk:
+        return {"available": True, "path": str(Path(sdk).resolve()), "source": "ANDROID SDK", "setup": spec["setup"]}
     path = shutil.which(spec["command"])
     return {"available": path is not None, "path": path, "source": "PATH", "setup": spec["setup"]}
 

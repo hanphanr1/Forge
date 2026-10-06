@@ -36,6 +36,14 @@ Split installation uses explicitly selected, staged APK bytes and observed devic
 
 `apk-info` reads manifest metadata only. It does not verify APK signatures, membership in a signing lineage, or the authenticity of the declared package identity, and a declared `minSdkVersion`/split set is the manifest's claim rather than an installability guarantee.
 
+`apk-decode`, `apk-rebuild` and `apk-manifest` describe a local decode, not verified vendor source: a decompiler's names, resources and control flow can differ from the shipped build, and a rebuild can behave differently from the original even when it installs. `apk-rebuild` output is unsigned and not installable until `apk-sign` succeeds.
+
+`apk-sign` either uses a keystore you supply or creates a throwaway local debug key when you pass `--debug-keystore`; a debug identity is not a release identity and is not evidence of who published the original. Store and key passwords are read from environment variables and passed to apksigner as `pass:` arguments, so they are visible to local process inspection while the tool runs — they are not written to evidence. FORGE never publishes signed output that fails its own `apksigner verify` pass, but a verified signature proves key possession over those bytes only. Signing does not authorize distribution, and replacing a signed application on a device changes what the device trusts.
+
+`ios-devices` and `ios-pair` invoke an external `libimobiledevice` tool read-only and record its output. FORGE has no iOS runtime adapter: no capture, hooking, injection, jailbreak, certificate or trust-modifying capability, and ADB is not an iOS transport. An observed pairing state is host/device trust metadata, not proof of capture, of a trusted session, or of any application login.
+
+`storage-report` is read-only. `evidence-prune` deletes only with `--apply`, never removes `maintenance` audit rows, and protects cited evidence unless `--force` is passed — but after a real prune, citations that pointed at removed rows no longer resolve and previously exported bundles may reference evidence that no longer exists. Pruning is the deliberate exception to FORGE's append-only guarantee; it bounds a long-running project and is not a way to make a case immutable. Task scope recorded by `init` is caller-declared metadata, not independent proof of authorization.
+
 ## External tools
 
 JADX, ADB, Frida, radare2, Java and optional curl components have their own update and trust boundaries. Install from observed official sources, retain version/hash provenance locally and avoid running untrusted binaries on a sensitive workstation. FORGE does not bundle those tools or silently install an emulator.

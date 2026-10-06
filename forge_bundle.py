@@ -18,8 +18,8 @@ _ID = re.compile(r"ev_[a-f0-9]{32}\Z")
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _REFERENCES = {"evidence", "evidence_id", "evidence_ids", "citations", "positive", "negative", "runs", "verification", "included", "before_id", "after_id", "before", "after"}
 _PRIVATE = {"body", "text", "stdout", "stderr", "raw", "content", "script", "snippet", "command", "command_template", "args", "args_template", "stdin_json", "stdin_template", "goal", "next_action", "notes", "source_path", "filename", "source_url", "final_url", "path", "input", "output", "version_output"}
-_FLAGS = {"success", "passed", "timed_out", "truncated", "source_changed", "runtime_changed", "window_truncated", "input_truncated", "output_truncated", "fields_omitted", "observations_omitted", "citations_omitted", "authentication_verified", "proven_auth_path", "proven_live", "empty", "stopped", "complete", "sampling_possible", "is_compatible", "binary_unchanged", "file_inventory_complete", "server_changes_verified", "schema_inferred", "network_performed", "values_exported", "fragment_expansion_performed", "response_observed", "partial"}
-_NUMBERS = {"size", "index_size", "schema_version", "status", "response_status", "returncode", "exit_code", "elapsed_ms", "stdout_bytes", "stderr_bytes", "records", "entries", "converted", "available", "omitted", "completed", "requested", "line", "column", "byte_offset", "offset", "depth", "count", "min_sdk", "api_level", "java_files", "error_count"}
+_FLAGS = {"success", "passed", "timed_out", "truncated", "source_changed", "runtime_changed", "window_truncated", "input_truncated", "output_truncated", "fields_omitted", "observations_omitted", "citations_omitted", "authentication_verified", "proven_auth_path", "proven_live", "empty", "stopped", "complete", "sampling_possible", "is_compatible", "binary_unchanged", "file_inventory_complete", "server_changes_verified", "schema_inferred", "network_performed", "values_exported", "fragment_expansion_performed", "response_observed", "partial", "apply", "dry_run", "force", "read_only", "network_action", "device_write"}
+_NUMBERS = {"size", "index_size", "schema_version", "status", "response_status", "returncode", "exit_code", "elapsed_ms", "stdout_bytes", "stderr_bytes", "records", "entries", "converted", "available", "omitted", "completed", "requested", "line", "column", "byte_offset", "offset", "depth", "count", "min_sdk", "api_level", "java_files", "error_count", "record_bytes", "blob_bytes", "bytes_freed", "blobs", "orphan_blobs", "referenced_blobs"}
 _ENUMS = {
     "bucket": {"HIT", "FREE", "FAIL", "TERMINAL", "RETRY", "ERROR", "BADFORMAT", "CUSTOM", "RISK"},
     "expected_bucket": {"HIT", "FREE", "FAIL"},
@@ -28,15 +28,18 @@ _ENUMS = {
     "category": {"static_candidate", "captured_http", "live_http"},
     "source": {"static_candidate", "captured_http", "live_http", "live_probe", "har_import", "local_import"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
-    "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android"},
+    "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
+             "idevice_id", "idevicepair"},
     "action": {"imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph", "devices", "install",
                "install-multiple", "preflight", "pull", "push", "packages", "package", "frida-prerequisite",
-               "apk-info"},
-    "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1"},
+               "apk-info", "decode", "manifest", "rebuild", "sign", "ios-devices", "ios-pair"},
+    "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
+               "forge.apk/v1", "forge.ios.v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
-               "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable"},
+               "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
+               "observed", "paired", "not-paired", "unknown"},
 }
-_CONTAINERS = {"sources_before", "sources_after", "current_sources", "files", "facts", "binary", "binary_before", "binary_after", "runtime", "runtime_before", "runtime_after", "runtime_current", "fingerprint", "executable", "before", "after", "limits", "selection", "map", "identity", "endpoints", "observations", "before_observations", "after_observations", "before_scope", "after_scope", "citations", "location", "request", "response", "device", "counts", "summary", "changes", "added", "removed", "changed"}
+_CONTAINERS = {"sources_before", "sources_after", "current_sources", "files", "facts", "binary", "binary_before", "binary_after", "runtime", "runtime_before", "runtime_after", "runtime_current", "fingerprint", "executable", "before", "after", "limits", "selection", "map", "identity", "endpoints", "observations", "before_observations", "after_observations", "before_scope", "after_scope", "citations", "location", "request", "response", "device", "devices", "counts", "summary", "changes", "added", "removed", "changed", "planned", "deleted", "filters", "invocation"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",

@@ -21,7 +21,7 @@ Commands emit `{ok, result}` JSON. Single-operation failures use exit 2 with san
 
 For an existing task, use `resume` and read its summary, next action, blockers, citations and file integrity. Select `--task` explicitly when a project contains several investigations. Historical `--checkpoint` selection is read-only; it does not make that checkpoint current.
 
-For a new task, use `init --target` with the identified official HTTP(S) site and `--goal` with the actual request. Record the task ID and revision 0.
+For a new task, use `init --target` with the identified official HTTP(S) site and `--goal` with the actual request. Record the task ID and revision 0. Declare the scope you are working under at the same time: `--authorization` (with `--basis`), `--network-profile`, and the `--in-scope`/`--out-of-scope` assets. `status` surfaces it, and a declared denial or an `offline` profile makes active steps refuse rather than proceed quietly — local analysis of artifacts you already hold stays available. Scope is caller-declared metadata; it is not independent proof of authorization.
 
 Before pausing or handing off, save a checkpoint containing:
 
@@ -67,7 +67,11 @@ Ordinary ADB access is not proof of Frida injection. Explain root/server, Gadget
 
 Android client reverse order that needs no root: `apk-info` the candidate APKs to learn package/version/minSdk/splits/ABIs, `adb packages` plus `adb package --package` to find the installed build and its `code_paths`/`splitNames`, `adb pull` that APK into a new project path, `jadx` it (partial output is usable and normal for obfuscated builds), `search` the decompiled sources for request builders and `native` declarations, then `native` the matching `lib/**/*.so` when the Java layer delegates to native code. Keep the base APK, each split APK and the pulled copy as separate cited artifacts; a pulled system APK is a device observation, not a provenance-checked vendor release.
 
-There is no iOS adapter in this collection. Identify an available compatible capture/debug environment and its pairing/signing prerequisites before requesting an iPhone connection. ADB does not support iOS. A trusted capture certificate does not automatically defeat pinning.
+To change an APK and run it, use the patch loop: `apk-decode` into a new directory, edit the decoded tree, `apk-rebuild`, then `apk-sign` — the rebuild is not installable until signing verifies, and a base plus its config splits must share one signing certificate or the device rejects the set as inconsistent. `apk-manifest` reports the declared surface (permissions, components, exported flags, deeplinks) before and after a change. Install the result on an authorized device and confirm it there; a verified signature proves key possession for those bytes, not that the device accepted them.
+
+Record a hook boundary as one `hook-evidence` triple: the static location, the runtime proof, and the local state it depends on. If the state dependency is not established, say so instead of implying the hook works without it.
+
+There is no iOS adapter in this collection. `ios-devices` and `ios-pair` only report what a configured `idevice_id`/`idevicepair` observed, so attachment and pairing are known before anyone changes device settings. Identify the compatible capture/debug environment and its pairing/signing prerequisites before requesting an iPhone connection. ADB does not support iOS, a jailed device cannot be instrumented, and a trusted capture certificate does not automatically defeat application layer pinning.
 
 Keep private apps/data out of scope. If hardware is missing, checkpoint the exact blocker and next experiment, continue independent work, and wait only at the device-dependent step. Do not manufacture successful runtime evidence.
 

@@ -22,6 +22,8 @@ Use JSON stdin for supported target controls, declare version probes explicitly 
 
 For Android clients, `apk-info` triages candidate APKs before anything is installed or unpacked; `adb packages`/`adb package` locate the installed build and its code paths; `adb pull` copies one explicit artifact into a new project path for `jadx`/`search`/`native`. Expect `jadx` to report `status: partial` on obfuscated builds and continue with the saved sources instead of re-running. A pulled APK is a device observation, not a provenance-checked vendor release, and `frida` on Android needs a rooted device with `frida-server` or a repackaged Gadget.
 
+When the task is to change an APK rather than read it, use `apk-decode`/`apk-manifest`/`apk-rebuild`/`apk-sign` and install the result on an authorized device before claiming the change works. Signing a base and its splits with the same explicit keystore is required for the device to accept the set. `ios-devices`/`ios-pair` exist only so iOS prerequisites are observable; FORGE still has no iOS capture or hooking capability. Declare scope at `init` rather than after the fact, and treat `evidence-prune` as a deliberate exception to the append-only evidence contract.
+
 ## Keep data boundaries intact
 
 - Scope artifact/search/index operations to the target, not the entire workspace.

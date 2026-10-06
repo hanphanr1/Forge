@@ -6,14 +6,18 @@ import hashlib
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import sqlite3
 import stat
 from urllib.parse import urlsplit
 
-from forge_core import ForgeError, redact_url, scrub_text
+from forge_core import EvidenceStore, ForgeError, redact_url, scrub_text
 
 
 PHASES = ("discover", "analyze", "probe", "implement", "verify")
 STATES = ("active", "blocked", "completed")
+AUTHORIZATION = ("unspecified", "granted", "pending", "denied")
+NETWORK_PROFILES = ("unspecified", "offline", "lab_only", "authorized_target_only", "unrestricted_lab")
+_AUTHORIZATION_BASES = ("unspecified", "written_contract", "bug_bounty_scope", "ctf_public", "own_system", "lab_only")
 _NEXT_DISCOVERY = "Use agent web/browser tools to identify official clients; save observed artifacts with provenance."
 _MEANING = "Agent-reported progress; citations and file hashes do not prove execution or verification."
 # Includes the artifact directory-index exclusions, plus explicit secret stores.
@@ -33,12 +37,30 @@ def initialize(args, store, platform_order):
         raise ForgeError("--target must be an HTTP(S) URL") from exc
     if not valid:
         raise ForgeError("--target must be an HTTP(S) URL; use the official site identified by the agent")
+    # Stored key names deliberately avoid the words the core redactor treats as credential
+    # bearers (for example a stored key literally named "authorization" would be masked).
+    scope = {
+        "scope_status": getattr(args, "authorization", "unspecified") or "unspecified",
+        "scope_basis": getattr(args, "basis", "unspecified") or "unspecified",
+        "in_scope": list(getattr(args, "in_scope", None) or []),
+        "out_of_scope": list(getattr(args, "out_of_scope", None) or []),
+        "network_profile": getattr(args, "network_profile", "unspecified") or "unspecified",
+    }
+    if scope["scope_status"] not in AUTHORIZATION:
+        raise ForgeError(f"--authorization must be one of {', '.join(AUTHORIZATION)}")
+    if scope["scope_basis"] not in _AUTHORIZATION_BASES:
+        raise ForgeError(f"--basis must be one of {', '.join(_AUTHORIZATION_BASES)}")
+    if scope["network_profile"] not in NETWORK_PROFILES:
+        raise ForgeError(f"--network-profile must be one of {', '.join(NETWORK_PROFILES)}")
+    if scope["scope_status"] == "granted" and scope["scope_basis"] == "unspecified":
+        raise ForgeError("An authorization status of 'granted' needs a --basis such as own_system or ctf_public")
     record = store.add("task", {
         "target": redact_url(args.target), "goal": args.goal,
         "phase": "discover", "state": "active", "revision": 0,
         "summary": "Task initialized; discovery has not been performed.",
         "next_action": _NEXT_DISCOVERY, "blockers": [], "evidence": [], "files": [],
         "platform_order": list(platform_order),
+        "scope": scope,
         "constraints": {"prefer_captchaless": True, "live_evidence_required": True,
                         "solver_spending": "requires_user_approval", "account_data": "explicit_user_scope_only"},
         "meaning": _MEANING,
@@ -75,8 +97,53 @@ def _progress(task, snapshot):
         "summary": data.get("summary", data.get("goal", "Legacy task; no checkpoint recorded.")),
         "next_action": data.get("next_action", _NEXT_DISCOVERY),
         "blockers": data.get("blockers", []), "evidence": data.get("evidence", []),
-        "files": data.get("files", []), "meaning": _MEANING,
+        "files": data.get("files", []), "scope": data.get("scope", {"scope_status": "unspecified"}),
+        "meaning": _MEANING,
     }
+
+
+def _task_for_scope(store):
+    """Read the newest task, tolerating a store bound to another thread.
+
+    The evidence connection is thread-bound, so a caller that embeds a command on a worker
+    thread (for example a listener) still needs the gate to read the same database rather than
+    crash. A short-lived same-thread connection reads it; the gate stays enforced.
+    """
+    try:
+        return _task(store, None)
+    except sqlite3.ProgrammingError:
+        borrowed = EvidenceStore(store.root)
+        try:
+            return _task(borrowed, None)
+        finally:
+            borrowed.close()
+
+
+def check_scope(store, activity, network=False, device=False):
+    """Refuse active work that the current task scope forbids.
+
+    Absent or unspecified scope is not a gate; only an explicit denial, or an
+    explicitly offline profile on a step that performs network/device I/O, blocks.
+    """
+    task = _task_for_scope(store)
+    if task is None:
+        return None
+    scope = task["data"].get("scope") or {}
+    authorization = scope.get("scope_status", "unspecified")
+    profile = scope.get("network_profile", "unspecified")
+    if authorization == "denied" and (network or device):
+        raise ForgeError(f"Task scope denies active work; the declared authorization status is denied. Update the task "
+                         f"scope before running {activity}")
+    if profile == "offline" and (network or device):
+        kind = "network" if network else "device"
+        raise ForgeError(f"Task scope forbids {kind} activity because the network profile is offline; "
+                         f"{activity} was not started")
+    return {"activity": activity, "scope_status": authorization, "scope_basis": scope.get("scope_basis", "unspecified"),
+            "network_profile": profile, "in_scope": scope.get("in_scope", []),
+            "out_of_scope": scope.get("out_of_scope", []),
+            "active": bool(network or device),
+            "meaning": "Scope is caller-declared task metadata; it is not independent proof of authorization. Local "
+                       "analysis of already-obtained artifacts is not blocked by a denied or offline scope."}
 
 
 def task_status(store, task_id=None):

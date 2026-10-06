@@ -14,6 +14,7 @@ import zipfile
 
 from forge_core import ForgeError
 from forge_toolchain import executable
+import forge_tasks
 
 
 SCHEMA = "forge.android.v1"
@@ -586,10 +587,12 @@ def _preflight(serial=None):
 
 
 def adb_preflight(args, store):
+    forge_tasks.check_scope(store, "adb-preflight", device=True)
     return store.add("runtime", _preflight(args.serial))
 
 
 def adb_install_splits(args, store):
+    forge_tasks.check_scope(store, "adb-install-splits", device=True)
     if not 0 < args.timeout <= 3600:
         raise ForgeError("Timeout must be greater than 0 and at most 3600 seconds")
     inputs, archive_hash, facts, preflight = [], None, None, None

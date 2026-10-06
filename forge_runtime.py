@@ -12,6 +12,7 @@ import time
 
 from forge_core import ForgeError, scrub_text
 from forge_toolchain import TOOLS, executable, find_tool
+import forge_tasks
 
 
 def _input_path(store, value):
@@ -95,6 +96,7 @@ def _relative(store, path):
 
 
 def adb_action(args, store):
+    forge_tasks.check_scope(store, f"adb {args.action}", device=True)
     adb = executable("adb")
     devices = _devices(adb)
     if args.action == "devices":
@@ -265,6 +267,7 @@ def _frida_companion(launcher, name):
 
 
 def frida_hook(args, store):
+    forge_tasks.check_scope(store, "frida", device=True)
     path = _input_path(store, args.script)
     if not path.is_file():
         raise ForgeError("Frida hook script does not exist")

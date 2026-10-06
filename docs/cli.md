@@ -13,13 +13,21 @@ Relative input paths resolve against that project. Operational single-command fa
 
 | Command | Inputs | Result |
 |---|---|---|
-| `init` | `--target URL`, optional `--goal TEXT` | New immutable task and workflow location |
-| `status` | None | Latest task/progress, historical HTTP/target verification records and recent evidence; no file rehash |
+| `init` | `--target URL`, optional `--goal TEXT`, scope flags | New immutable task and workflow location |
+| `status` | None | Latest task/progress including declared scope, historical HTTP/target verification records and recent evidence; no file rehash |
 | `checkpoint` | Required `--phase`, `--summary`, `--expect-revision`; optional task/state/next/blocker/evidence/file | New task-specific progress revision |
 | `resume` | Optional `--task ID`, `--checkpoint ID` | Selected state and current integrity of checkpointed files |
 | `history` | Optional task, `--after-revision N`, `--limit N` | Ascending checkpoint page, `has_more` and cursor |
+| `claim` | `TEXT`, required `--scope`; optional `--state`, `--evidence` | Scoped agent statement with retained citations |
+| `hook-evidence` | `TEXT`, `--package`, `--static-location`/`--static-evidence`, `--dynamic-proof`/`--dynamic-evidence`; optional state pair and `--scope` | One claim holding a hook evidence triple |
+| `storage-report` | Optional `--max-scan-rows N` | Read-only evidence/blob/database inventory |
+| `evidence-prune` | `--unreferenced-blobs` or `--older-than DAYS`; `--apply` to delete | Plan by default; guarded deletion with an audit row |
 
 See [checkpoints](checkpoints.md) for lifecycle and state invariants. `--blocker`, `--evidence` and `--file` repeat. History page size is 1 to 1000. The default selected task is the newest; use its ID to avoid ambiguity in a multi-task project.
+
+`init` also records caller-declared scope: `--authorization` (`unspecified`, `granted`, `pending`, `denied`), `--basis`, `--network-profile` (`unspecified`, `offline`, `lab_only`, `authorized_target_only`, `unrestricted_lab`), and repeatable `--in-scope`/`--out-of-scope`. `--authorization granted` requires an explicit `--basis`. A denied scope blocks active steps (`probe`, `probe-run`, `adb *`, `frida`), an `offline` profile blocks network and device steps, and local analysis of already-obtained artifacts stays available either way. See [scope and retention](scope-and-retention.md).
+
+`hook-evidence` keeps a hook boundary together: where it is, what proved it at runtime, and which local state it needs. Each part cites its own record; an omitted state dependency is stored as `not-established` instead of being assumed, and `--state-dependency` without `--state-evidence` is rejected.
 
 ## Artifacts and analysis
 
@@ -103,6 +111,49 @@ forge --project target native imports client.exe
 - `native` actions: `imports`, `exports`, `strings`, `functions`, `disasm`, `xrefs`, `callgraph`. Deep actions add `--address`, `--max-output` and `--max-items` with strict project input and bounded backend results; observed function/basic-block membership supports graph edges, unresolved memberships stay labeled. No decompiler/source-recovery guarantee. See [native](native.md).
 
 See [toolchain setup](toolchain.md) for overrides and platform/device prerequisites. Portable candidates must suit the host; on POSIX Windows launchers are skipped and local executables need execution permission.
+
+## Capture ingest and shape analysis
+
+```sh
+forge --project target capture-ingest --port 0 --seconds 60
+forge --project target websocket-analyze capture.har
+forge --project target api-shape --domain "<observed-host>"
+```
+
+`capture-ingest` runs a bounded loopback listener so a capture tool can push HAR directly instead of a manual export/import. It binds `127.0.0.1` only, stops at `--seconds` (1..3600), `--max-records` or an error, and accepts a HAR document, an entries array or one entry object. Each exchange is stored through the same normalization as `har-import`, so pushed traffic stays `captured_http` and is never promoted to live proof. With `--port 0` the chosen port is announced once on stderr; stdout stays `{ok, result}`. `--token` requires a matching `X-Forge-Token` or `Authorization: Bearer` header. Oversized bodies, wrong method/route, a bad token and malformed JSON are rejected with per-reason counters and never echo request data.
+
+`websocket-analyze` parses frames from HAR entries carrying `_webSocketMessages`/`_webSocketFrames` or from explicit `{"url", "frames"}` documents: per session it reports frame counts, direction (or `unknown` when the document cannot establish it), opcode/type counts, payload byte stats, close codes and JSON field-name paths only. `api-shape` summarizes stored HTTP evidence per domain: method/path identities, status distribution, and request/response header, JSON field-path, form and query *names*. Both are read-only, export names rather than values, and report their caps. See [capture ingest](capture-ingest.md).
+
+## APK patching
+
+```sh
+forge --project target apk-decode client.apk --output decoded
+forge --project target apk-manifest decoded
+forge --project target apk-rebuild decoded --output rebuilt.apk
+forge --project target apk-sign rebuilt.apk --output signed.apk --debug-keystore
+forge --project target adb install --serial "<observed-serial>" --path signed.apk
+```
+
+`apk-decode` runs apktool into a new project-local directory and only reports success when the decoded `AndroidManifest.xml` exists. `apk-manifest` summarizes declared permissions, components with their `android:exported` value, intent filters and deeplinks from a decoded directory, a decoded manifest, or a raw APK. `apk-rebuild` produces unsigned bytes that are not installable until `apk-sign` succeeds. `apk-sign` runs zipalign, apksigner and a verification pass, requires either `--keystore`/`--alias` with password environment variables or an explicit `--debug-keystore`, and never publishes output that fails verification. See [APK patching](apk-patching.md).
+
+## iOS boundary
+
+```sh
+forge --project target ios-devices
+forge --project target ios-pair --udid "<observed-udid>"
+```
+
+Both commands only invoke an explicitly configured `idevice_id`/`idevicepair` and record what the tool printed. FORGE has no iOS runtime adapter: no capture, hooking, injection, jailbreak or certificate capability, and ADB does not apply. Pairing state is host/device trust metadata, not proof of capture or of an application-layer session. See [iOS](ios.md).
+
+## Maintenance
+
+```sh
+forge --project target storage-report
+forge --project target evidence-prune --unreferenced-blobs
+forge --project target evidence-prune --older-than 30 --kind http_probe --apply
+```
+
+`storage-report` is read-only. `evidence-prune` plans by default and only deletes with `--apply`; cited evidence, audit rows and post-checkpoint records are protected unless `--force` lifts that. Pruning breaks the append-only citation guarantee. See [scope and retention](scope-and-retention.md).
 
 ## Evidence and controls
 

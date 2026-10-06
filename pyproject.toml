@@ -40,7 +40,8 @@ Changelog = "https://github.com/hanphanr1/Forge/blob/main/CHANGELOG.md"
 py-modules = [
     "forge", "forge_core", "forge_artifacts", "forge_network", "forge_runtime",
     "forge_toolchain", "forge_tasks", "forge_version", "forge_har", "forge_execution", "forge_protocol",
-    "forge_comparisons", "forge_graphql", "forge_native", "forge_android", "forge_bundle",
+    "forge_comparisons", "forge_graphql", "forge_native", "forge_android", "forge_apktool", "forge_ios",
+    "forge_retention", "forge_capture", "forge_bundle",
 ]
 
 [tool.setuptools.dynamic]

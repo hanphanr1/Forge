@@ -88,3 +88,5 @@ An installer exit of zero is not accepted as success when its retained body repo
 No connected authorized compatible device means installation cannot be demonstrated. A real runtime check additionally needs an explicitly supplied owned APK set with inspectable metadata and an acceptable new-install package. Deterministic fixture tests exercise parser, selection, compatibility, cleanup, and dispatch decisions; patched backend results in those tests are **not device-installation proof**.
 
 Manifest attribute handling follows Android's [ApkLiteParseUtils](https://android.googlesource.com/platform/frameworks/base/+/android-14.0.0_r1/core/java/android/content/pm/parsing/ApkLiteParseUtils.java). FORGE's parser is a bounded metadata reader, not Android's full package/resource parser.
+
+To change an APK and run the result on the device instead of only reading it, continue with the [APK patching](apk-patching.md) loop: `apk-decode`, `apk-manifest`, `apk-rebuild`, `apk-sign`, then `adb install` or `adb-install-splits`. A rebuilt APK is not installable until signing verifies, and a base plus its config splits must share one signing certificate.

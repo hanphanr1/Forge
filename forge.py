@@ -51,6 +51,29 @@ def claim(args, store):
                                "meaning": "Agent-authored statement; citations are retained, not independently proven by the store"})
 
 
+def hook_evidence(args, store):
+    if bool(args.state_dependency) != bool(args.state_evidence):
+        raise ForgeError("--state-dependency and --state-evidence must be supplied together, or both omitted")
+    for identifier in (args.static_evidence, args.dynamic_evidence, args.state_evidence):
+        if identifier:
+            store.get(identifier)
+    triple = {
+        "static_location": {"text": args.static_location, "evidence": args.static_evidence},
+        "dynamic_proof": {"text": args.dynamic_proof, "evidence": args.dynamic_evidence},
+        "state_dependency": ({"text": args.state_dependency, "evidence": args.state_evidence}
+                             if args.state_dependency else {"text": None, "evidence": None,
+                                                            "state": "not-established"}),
+    }
+    return store.add("claim", {
+        "text": args.text, "state": args.state,
+        "evidence": [item for item in (args.static_evidence, args.dynamic_evidence, args.state_evidence) if item],
+        "scope": args.scope, "package": args.package, "hook": triple,
+        "meaning": "Hook evidence kept as one triple: where the boundary is, what proved it at runtime, and which "
+                   "local state it depends on. A missing state dependency is recorded as not-established rather than "
+                   "assumed. Citations are retained, not independently proven by the store.",
+    })
+
+
 def verify(args, store):
     positive = store.get(args.positive)
     negative = store.get(args.negative)
@@ -128,9 +151,17 @@ def parser():
     cli.add_argument("--version", action="version", version=f"FORGE {__version__}")
     cli.add_argument("--project", default=".", help="Existing target folder; evidence stays under its .forge directory")
     commands = cli.add_subparsers(dest="command", required=True)
-    command = commands.add_parser("init", help="Save target goal and agent workflow constraints")
+    command = commands.add_parser("init", help="Save target goal, authorization scope and agent workflow constraints")
     command.add_argument("--target", required=True)
     command.add_argument("--goal", default="Discover and verify the target protocol, then implement its checker")
+    command.add_argument("--authorization", choices=forge_tasks.AUTHORIZATION, default="unspecified",
+                         help="Caller-declared authorization status for this target")
+    command.add_argument("--basis", choices=["unspecified", "written_contract", "bug_bounty_scope", "ctf_public",
+                                             "own_system", "lab_only"], default="unspecified")
+    command.add_argument("--network-profile", choices=forge_tasks.NETWORK_PROFILES, default="unspecified",
+                         help="offline blocks network and device steps for this task")
+    command.add_argument("--in-scope", action="append", help="Declared in-scope asset; repeatable")
+    command.add_argument("--out-of-scope", action="append", help="Declared out-of-scope asset; repeatable")
     command.set_defaults(handler=initialize)
     command = commands.add_parser("status", help="Read current task progress and recent project evidence")
     command.set_defaults(handler=status)
@@ -147,6 +178,19 @@ def parser():
     command.add_argument("--evidence", action="append")
     command.add_argument("--scope", required=True, help="Artifact version, run ID or other applicability boundary")
     command.set_defaults(handler=claim)
+    command = commands.add_parser("hook-evidence",
+                                  help="Save one hook evidence triple: static location, dynamic proof, state dependency")
+    command.add_argument("text")
+    command.add_argument("--package", required=True, help="Target package or module the boundary belongs to")
+    command.add_argument("--static-location", required=True, help="Observed class/method/symbol/asset location")
+    command.add_argument("--static-evidence", required=True, help="Cited record for the static location")
+    command.add_argument("--dynamic-proof", required=True, help="Observed runtime proof such as a hook log")
+    command.add_argument("--dynamic-evidence", required=True, help="Cited record for the dynamic proof")
+    command.add_argument("--state-dependency", help="Local state the boundary needs (prefs row, nonce, keystore flag)")
+    command.add_argument("--state-evidence", help="Cited record for the state dependency")
+    command.add_argument("--state", choices=["OBSERVED", "INFERRED", "UNKNOWN", "CONTRADICTED"], default="OBSERVED")
+    command.add_argument("--scope", required=True, help="Artifact version, run ID or other applicability boundary")
+    command.set_defaults(handler=hook_evidence)
     command = commands.add_parser("verify", help="Gate protocol evidence on real positive and negative probe controls")
     command.add_argument("--positive", required=True)
     command.add_argument("--negative", required=True)
@@ -164,9 +208,14 @@ def parser():
     import forge_comparisons
     import forge_graphql
     import forge_android
+    import forge_apktool
+    import forge_ios
+    import forge_retention
+    import forge_capture
     import forge_bundle
     for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime, forge_har, forge_execution, forge_protocol,
-                   forge_comparisons, forge_graphql, forge_android, forge_bundle):
+                   forge_comparisons, forge_graphql, forge_android, forge_apktool, forge_ios, forge_retention,
+                   forge_capture, forge_bundle):
         module.register(commands)
     return cli
 

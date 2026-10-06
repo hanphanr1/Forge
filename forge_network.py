@@ -17,6 +17,7 @@ import zlib
 from pathlib import Path
 
 from forge_core import ForgeError, redact, scrub_text
+import forge_tasks
 
 
 _FLOW = re.compile(r"\$\{flow\.([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -691,6 +692,7 @@ def _prepare_live(args, store, many):
 
 
 def handle_probe(args, store):
+    forge_tasks.check_scope(store, "probe", network=True)
     specs, secrets, environment = _prepare_live(args, store, False)
     bindings = {}
     session = None
@@ -714,6 +716,7 @@ def handle_probe(args, store):
 
 
 def handle_probe_run(args, store):
+    forge_tasks.check_scope(store, "probe-run", network=True)
     specs, secrets, environment = _prepare_live(args, store, True)
     bindings = {}
     session = None

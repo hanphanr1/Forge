@@ -17,6 +17,13 @@ An explicit but broken override fails. It does not silently select a different t
 | Frida | `FORGE_FRIDA` | `tools/frida/Scripts/frida.exe` or `tools/frida/bin/frida` |
 | radare2 | `FORGE_R2` | `tools/radare2/bin/radare2.exe`, `r2.exe` or `r2` |
 | Java | `FORGE_JAVA` | Explicit executable or `PATH` |
+| apktool | `FORGE_APKTOOL` | `tools/apktool/apktool.bat` or `tools/apktool/apktool` |
+| apksigner | `FORGE_APKSIGNER` | `tools/build-tools/apksigner.bat` or `tools/build-tools/apksigner`, else `ANDROID_HOME`/`ANDROID_SDK_ROOT` `build-tools/*/` |
+| zipalign | `FORGE_ZIPALIGN` | `tools/build-tools/zipalign.exe` or `tools/build-tools/zipalign`, else `ANDROID_HOME`/`ANDROID_SDK_ROOT` `build-tools/*/` |
+| idevice_id | `FORGE_IDEVICE_ID` | `PATH` (libimobiledevice) |
+| idevicepair | `FORGE_IDEVICEPAIR` | `PATH` (libimobiledevice) |
+
+For a signature tool, a caller-configured Android SDK is consulted after the portable path and before `PATH`; the newest numeric `build-tools/*/` directory containing the launcher wins.
 
 For wheel installations, use `PATH` or explicit executable overrides. The wheel does not bundle the portable `tools/` directory.
 
@@ -26,8 +33,11 @@ For wheel installations, use `PATH` or explicit executable overrides. The wheel 
 - [JADX releases](https://github.com/skylot/jadx/releases), with the Java version required by that release.
 - [Frida installation](https://frida.re/docs/installation/) and [Android setup](https://frida.re/docs/android/).
 - [radare2 releases](https://github.com/radareorg/radare2/releases).
+- [apktool releases](https://github.com/iBotPeaches/Apktool/releases), with Java 8 or later.
+- [Android SDK build-tools](https://dl.google.com/android/repository/repository2-3.xml) — the official repository index; the archive carries Google's own `NOTICE.txt`. apksigner and zipalign are redistributed under that notice, and the SDK licence applies to the archive.
+- [libimobiledevice](https://libimobiledevice.org/) for `idevice_id` and `idevicepair`.
 
-Keep publication URL, version, hash and applicable license in your own local installation records. A third-party mirror is not official merely because it hosts the same filename.
+Keep publication URL, version, hash and applicable license in your own local installation records. A third-party mirror is not official merely because it hosts the same filename. This checkout keeps its own record next to the tools: `tools/android-install.json` for platform-tools and JADX, `tools/native-install.json` for Frida and radare2, and `tools/patch-install.json` for apktool plus build-tools, including the official digest that was checked.
 
 `FORGE_JAVA` chooses the Java executable/JAVA_HOME for the JADX subprocess, not a machine-wide setting. FORGE adds a 2 GiB Java heap cap unless `JAVA_OPTS` or `JADX_OPTS` already contains `-Xmx`. JADX defaults to two jobs. Heap cap is not total process memory.
 
