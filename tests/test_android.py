@@ -430,6 +430,26 @@ class CommandBehaviorTests(unittest.TestCase):
             self.assertTrue(record["data"]["success"])
             self.assertEqual(record["data"]["installer"]["stdout"], "Success\n")
             self.assertEqual(len(record["data"]["inputs"][0]["sha256"]), 64)
+
+    def test_declared_installer_is_passed_and_recorded(self):
+        self.args.installer = "com.android.vending"
+        with patch.object(android, "executable", return_value="configured-adb"), \
+                patch.object(android, "_run", side_effect=self.backend) as calls:
+            record = android.adb_install_splits(self.args, self.store)
+        command = calls.call_args_list[-1].args[0]
+        self.assertEqual(command[3:6], ["install", "-i", "com.android.vending"])
+        self.assertEqual(record["data"]["declared_installer"], "com.android.vending")
+        self.assertIn("install source", record["data"]["policy"])
+
+    def test_invalid_declared_installer_never_dispatches(self):
+        for value in ("vending", "com. android", "com/evil", "-i", "com.android.vending;id"):
+            with self.subTest(value=value):
+                self.args.installer = value
+                with patch.object(android, "executable", return_value="configured-adb"), \
+                        patch.object(android, "_run", side_effect=self.backend) as calls:
+                    with self.assertRaisesRegex(ForgeError, "must be a package name"):
+                        android.adb_install_splits(self.args, self.store)
+                self.assertFalse(any("install" in call.args[0] for call in calls.call_args_list))
             self.assertTrue(self.base.exists())
 
     def test_invalid_metadata_rejected_before_any_adb_dispatch(self):

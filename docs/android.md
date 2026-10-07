@@ -90,3 +90,7 @@ No connected authorized compatible device means installation cannot be demonstra
 Manifest attribute handling follows Android's [ApkLiteParseUtils](https://android.googlesource.com/platform/frameworks/base/+/android-14.0.0_r1/core/java/android/content/pm/parsing/ApkLiteParseUtils.java). FORGE's parser is a bounded metadata reader, not Android's full package/resource parser.
 
 To change an APK and run the result on the device instead of only reading it, continue with the [APK patching](apk-patching.md) loop: `apk-decode`, `apk-manifest`, `apk-rebuild`, `apk-sign`, then `adb install` or `adb-install-splits`. A rebuilt APK is not installable until signing verifies, and a base plus its config splits must share one signing certificate.
+
+### Declaring the install source
+
+`--installer PACKAGE` passes `adb install -i PACKAGE` and records `declared_installer` in evidence. Some apps refuse to run unless their recorded install source is the store, which is a check on the install source rather than on the byte signature. Declaring `com.android.vending` satisfies that check; it does not defeat a real signature or Play Integrity verification, and the record's policy text says the flag only declared the source. A locked device with no `su` and no `adb root` cannot run `frida-server`, so the only Frida transport there is a Gadget repackage installed this way; see [hooking a device without root](apk-patching.md#hooking-a-device-without-root).

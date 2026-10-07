@@ -121,8 +121,8 @@ What the repackaged build actually is, so nothing is mistaken for the original a
   honest routes are a rooted test device, a desktop or web client of the same service, or static
   analysis of the original artifact.
 - Split apps: injecting the base APK places the Gadget in the base's `lib/<abi>/`, while the
-  ABI split holds the app's own native libraries. Whether the merged install loads it is a
-  device fact, not something this command proves.
+  ABI split holds the app's own native libraries. On one Android 14 device this still loaded, but
+  it remains a device fact that this command does not prove.
 
 The Gadget itself is not downloaded. Use `artifact-fetch` with the official Frida release URL
 and the published SHA-256, then decompress the `.so.xz`; the Gadget must match the Frida version
@@ -144,3 +144,49 @@ A complete check on an authorized device is: decode, rebuild, sign, install with
 `adb install` (single APK) or `adb-install-splits` (base plus splits), confirm the package with
 `adb package --package PACKAGE`, then remove it. `apk-sign` output is only proven installable
 when the device actually accepted it; `apksigner verify` proves the signature, not the install.
+
+## Hooking a device without root
+
+A locked device with no `su` and no `adb root` cannot run `frida-server`, so a Gadget repackage is
+the only Frida transport left. The loop below ran end to end on an Android 14 device with a locked
+bootloader, `ro.debuggable=0` and no `su` binary:
+
+1. `apk-gadget` the base APK with a matching `frida-gadget-<version>-android-<abi>.so.xz`, already
+   decompressed.
+2. Sign the base **and every split with one keystore**. Separate keys make Android reject the set as
+   having inconsistent signatures.
+3. Install the set with `adb-install-splits --installer com.android.vending`.
+4. Launch the app and confirm the Gadget listens, for example by finding the port in
+   `/proc/net/tcp`, or by running `frida-ps -H HOST:PORT` once the port is forwarded.
+5. Attach without a device-side server:
+
+```console
+forge --project target frida --package Gadget --attach --host 127.0.0.1:27042 --forward 27042 --script hook.js
+```
+
+`--forward` runs `adb forward tcp:PORT tcp:PORT` before attaching and removes it afterwards;
+`--host` attaches to a Gadget instead of looking for a device-side `frida-server`, and therefore
+requires `--attach`. Spawning a process still needs a server.
+
+### Why the install carries `--installer`
+
+Apps commonly refuse to start with a message like "install the app from Play" when the recorded
+install source is not the store. That check reads the install source rather than the byte
+signature, and `adb install -i com.android.vending` satisfies it. This is not a signature bypass: a
+build that fails a real signature or Play Integrity check still refuses to run, and the evidence
+record states that `--installer` only declared the source.
+
+### What was actually observed
+
+- The Gadget loaded from the base APK's `lib/<abi>/` through `wrap.sh` and `LD_PRELOAD`, even
+  though the app's own native libraries came from the ABI split.
+- The port listened inside the app process and Frida 17.22.1 attached over the forwarded port; a
+  live hook ran inside the app and read values from it, with no root at any point.
+- Before `--installer` was declared, the same build was rejected by the app itself, which is the
+  honest limit of this route: a repackaged build is not the published app and can be refused on
+  that basis alone.
+
+Nothing here is proof about the official build. The app under this loop is debuggable, its
+signature belongs to the local keystore, and the values it reports can differ from the published
+app's own.
+

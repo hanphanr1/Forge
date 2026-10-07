@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0 - 2026-10-07
+
+- `frida` gains `--host HOST:PORT` and `--forward PORT`: the first attaches to a Gadget instead of a device-side `frida-server` and requires `--attach`, the second sets the port up with `adb forward` and removes it afterwards. This is the no-root transport, and it is now a first-class command instead of ad-hoc host tooling.
+- `adb-install-splits` and `adb install` gain `--installer PACKAGE`, which passes `adb -i` and records `declared_installer`. Apps that refuse to run unless their recorded install source is the store are satisfied by this, without touching the byte signature, and the evidence policy text states that the flag only declared the source.
+- Evidence records the transport mode, host, forwarded port and forward result for every hook session, and a failed forward is recorded before anything attaches.
+- Verified on a real Android 14 device with a locked bootloader, `ro.debuggable=0` and no `su`: the Gadget loaded from the base APK of a split install through `wrap.sh`/`LD_PRELOAD`, listened on its port, and Frida 17.22.1 attached over a forwarded port and ran a live hook inside the app. The same build was refused by the app itself until the install source was declared, which is the honest limit of the route.
+- Tests cover the Gadget attach path, forward setup and cleanup, the validation that rejects a host without `--attach`, the installer flag, and rejection of an invalid installer value.
+
 ## 0.7.0 - 2026-10-07
 
 - New `apk-gadget` action: repackages an APK with a Frida Gadget through `frida-apk`, which is the only Frida route on a device without root. `frida-server` needs root, so a jailed target has no other dynamic option.

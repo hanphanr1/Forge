@@ -231,9 +231,62 @@ class FridaPrerequisiteTests(unittest.TestCase):
                         result(code=1, stdout=b"Failed to spawn: need Gadget to attach on jailed Android\n"))
 
     def test_unreachable_server_at_spawn_is_named_as_the_blocker(self):
-        with self.assertRaisesRegex(ForgeError, "no reachable frida-server"):
+        with self.assertRaisesRegex(ForgeError, "no reachable hook transport"):
             self.invoke(result(b"  PID  Name\n1234  system_server\n"),
                         result(code=1, stderr=b"frida: unable to connect to remote frida-server"))
+
+    def gadget_args(self, extra=()):
+        return self.parser.parse_args(["frida", "--package", "Gadget", "--script", "hook.js", "--duration", "5", *extra])
+
+    def test_gadget_host_attaches_over_the_forwarded_port_and_removes_it(self):
+        calls = []
+
+        def run(command, timeout):
+            calls.append(list(command))
+            if "frida-ps" in command[0]:
+                return result(b"  PID  Name\n16320  Gadget\n")
+            if "forward" in command:
+                return result(b"27042\n")
+            return result(code=0, stdout=b"[FORGE] java=true\n")
+
+        args = self.gadget_args(["--host", "127.0.0.1:27042", "--forward", "27042", "--attach"])
+        with patch.object(forge_runtime, "executable", return_value=str(self.launcher)), \
+                patch.object(forge_runtime, "_run", side_effect=run):
+            record = args.handler(args, self.store)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertEqual(data["transport"]["mode"], "gadget-host")
+        self.assertEqual(data["transport"]["forwarded_port"], 27042)
+        self.assertEqual(data["transport"]["forward"]["returncode"], 0)
+        hook = [call for call in calls if "-l" in call][0]
+        self.assertEqual(hook[1:5], ["-H", "127.0.0.1:27042", "-n", "Gadget"])
+        self.assertNotIn("-U", hook)
+        self.assertIn(["forward", "--remove", "tcp:27042"], [call[1:] for call in calls])
+
+    def test_gadget_host_requires_attach_and_a_well_formed_host(self):
+        cases = ((["--host", "127.0.0.1", "--attach"], "--host must be HOST:PORT"),
+                 (["--host", "127.0.0.1:27042"], "requires --attach"),
+                 (["--host", "127.0.0.1:27042", "--attach", "--forward", "70000"], "between 1 and 65535"),
+                 (["--forward", "27042", "--attach"], "--forward needs --host"))
+        for extra, message in cases:
+            with self.subTest(extra=extra), self.assertRaisesRegex(ForgeError, message):
+                args = self.gadget_args(extra)
+                args.handler(args, self.store)
+
+    def test_failed_forward_is_recorded_and_never_runs_the_hook(self):
+        def run(command, timeout):
+            if "forward" in command:
+                return result(code=1, stderr=b"error: cannot bind listener")
+            return result(b"  PID  Name\n")
+
+        args = self.gadget_args(["--host", "127.0.0.1:27042", "--forward", "27042", "--attach"])
+        with patch.object(forge_runtime, "executable", return_value=str(self.launcher)), \
+                patch.object(forge_runtime, "_run", side_effect=run) as mocked:
+            with self.assertRaisesRegex(ForgeError, "port forward failed"):
+                args.handler(args, self.store)
+        self.assertFalse(any("-l" in call.args[0] for call in mocked.call_args_list))
+        actions = [record["data"].get("action") for record in self.store.list()]
+        self.assertIn("frida-forward", actions)
 
     def test_unclassified_failure_stays_a_generic_session_error(self):
         with self.assertRaisesRegex(ForgeError, "did not complete"):

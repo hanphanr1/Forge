@@ -117,7 +117,10 @@ def adb_action(args, store):
     if args.action == "install":
         if not args.path or not _input_path(store, args.path).is_file():
             raise ForgeError("adb install requires --path to an existing APK; APKS/XAPK require split-aware installation")
-        command += ["install", "-r", str(_input_path(store, args.path))]
+        command += ["install", "-r"]
+        if getattr(args, "installer", None):
+            command += ["-i", args.installer]
+        command += [str(_input_path(store, args.path))]
     elif args.action in {"launch", "stop"}:
         if not args.package or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", args.package):
             raise ForgeError("Provide a valid --package")
@@ -250,7 +253,8 @@ def adb_action(args, store):
                                    "timed_out": expired, "stdout": text,
                                    "stderr": scrub_text(stderr.decode("utf-8", "replace")), "blob": blob,
                                    "remote": remote, "path": _relative(store, destination) if destination else None,
-                                   "sha256": digest, "size": size})
+                                   "sha256": digest, "size": size,
+                                   "declared_installer": getattr(args, "installer", None)})
     if not success:
         raise ForgeError(f"ADB {args.action} failed; see evidence {record['id']}")
     return record
@@ -272,50 +276,95 @@ def frida_hook(args, store):
     if not path.is_file():
         raise ForgeError("Frida hook script does not exist")
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", args.package):
-        raise ForgeError("Provide a valid --package")
+        raise ForgeError("Provide a valid --package, or the Gadget process name (for example Gadget) with --host")
+    host = getattr(args, "host", None)
+    forward_port = getattr(args, "forward", None)
+    if host is not None and not re.fullmatch(r"[A-Za-z0-9.\-]+:[0-9]{1,5}", host):
+        raise ForgeError("--host must be HOST:PORT, for example 127.0.0.1:27042")
+    if forward_port is not None and host is None:
+        raise ForgeError("--forward needs --host: a Gadget listener is reached through the forwarded port")
+    if forward_port is not None and not 1 <= forward_port <= 65535:
+        raise ForgeError("--forward must be a TCP port between 1 and 65535")
+    if host is not None and not args.attach:
+        raise ForgeError("--host attaches to a running Gadget, so it requires --attach; spawning needs a device-side "
+                         "frida-server")
     launcher = executable("frida")
     device = args.device or "usb"
-    prerequisite = {"checked": False, "available": False, "listing": None}
-    listing_tool = _frida_companion(launcher, "frida-ps")
-    if listing_tool:
-        listing = [listing_tool] + (["-D", args.device] if args.device else ["-U"])
-        code, stdout, stderr, expired = _run(listing, min(max(args.duration, 5) + 15, 60))
-        prerequisite = {"checked": True, "available": code == 0 and not expired, "returncode": code,
-                        "timed_out": expired, "listing": stdout.decode("utf-8", "replace")[:4096],
-                        "stderr": scrub_text(stderr.decode("utf-8", "replace"))[:2048],
-                        "setup": "Android also needs a reachable frida-server (root) or a repackaged Gadget build "
-                                 "(`apk-gadget` then `apk-sign`); a jailed device cannot be spawned without one"}
-        if not prerequisite["available"]:
-            record = store.add("runtime", {"tool": "frida", "action": "frida-prerequisite", "package": args.package,
-                                           "device": device, "success": False, "returncode": code,
-                                           "timed_out": expired, "stdout": prerequisite["listing"],
-                                           "stderr": prerequisite["stderr"], "prerequisite": prerequisite})
-            raise ForgeError("Frida device prerequisite missing: no reachable frida-server/Gadget on the target "
-                             f"device. Evidence {record['id']}")
-    command = [launcher]
-    command += ["-D", args.device] if args.device else ["-U"]
-    command += ["-n" if args.attach else "-f", args.package, "-l", str(path), "-q", "-t", str(args.duration)]
-    code, stdout, stderr, expired = _run(command, args.duration + 15)
-    text = stderr.decode("utf-8", "replace")
-    combined = text + stdout.decode("utf-8", "replace")
-    success = code == 0 and not expired
-    guidance = None
-    if not success:
-        if _FRIDA_JAILED.search(combined):
-            guidance = ("jailed Android cannot be spawned: repackage the APK with `apk-gadget` and a matching "
-                        "frida-gadget, sign it with `apk-sign`, or use a rooted device running frida-server")
-        elif _FRIDA_UNREACHABLE.search(combined):
-            guidance = "no reachable frida-server on the device; start one on a rooted target or use --device/--attach"
-        elif _FRIDA_LAUNCH_REFUSED.search(combined):
-            guidance = "the target refused the spawn; check package name, debuggability and signature"
-        if guidance:
-            prerequisite["available"] = False
-            prerequisite["reason"] = guidance
-    record = store.add("runtime", {"tool": "frida", "action": "frida-hook", "package": args.package, "device": device,
-                                   "attach": args.attach, "script_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                                   "success": success, "returncode": code, "timed_out": expired,
-                                   "stdout": stdout.decode("utf-8", "replace"), "stderr": scrub_text(text),
-                                   "prerequisite": prerequisite})
+    transport = {"mode": "gadget-host" if host else "usb", "host": host, "forwarded_port": forward_port,
+                 "forward": None}
+    if host:
+        transport["note"] = ("A Gadget host session has no device-side frida-server: the app carries the Gadget, and "
+                             "this host attaches over the forwarded port")
+    adb_tool = None
+    if forward_port is not None:
+        adb_tool = executable("adb")
+        code, stdout, stderr, expired = _run([adb_tool, "forward", f"tcp:{forward_port}", f"tcp:{forward_port}"], 30)
+        transport["forward"] = {"returncode": code, "timed_out": expired,
+                                "stdout": stdout.decode("utf-8", "replace")[:512],
+                                "stderr": scrub_text(stderr.decode("utf-8", "replace"))[:512]}
+        if code != 0 or expired:
+            failure = store.add("runtime", {"tool": "frida", "action": "frida-forward", "package": args.package,
+                                            "device": device, "transport": transport, "success": False,
+                                            "returncode": code, "timed_out": expired,
+                                            "stdout": transport["forward"]["stdout"],
+                                            "stderr": transport["forward"]["stderr"]})
+            raise ForgeError(f"ADB port forward failed; evidence {failure['id']}")
+    try:
+        prerequisite = {"checked": False, "available": False, "listing": None}
+        listing_tool = _frida_companion(launcher, "frida-ps")
+        if listing_tool:
+            if host:
+                listing = [listing_tool, "-H", host]
+                setup = ("Reach the Gadget port on this host first: install the repackaged build, then forward the "
+                         "Gadget port with adb")
+            else:
+                listing = [listing_tool] + (["-D", args.device] if args.device else ["-U"])
+                setup = ("Android also needs a reachable frida-server (root) or a repackaged Gadget build "
+                         "(`apk-gadget` then `apk-sign`), attached through --host HOST:PORT --forward PORT --attach")
+            code, stdout, stderr, expired = _run(listing, min(max(args.duration, 5) + 15, 60))
+            prerequisite = {"checked": True, "available": code == 0 and not expired, "returncode": code,
+                            "timed_out": expired, "listing": stdout.decode("utf-8", "replace")[:4096],
+                            "stderr": scrub_text(stderr.decode("utf-8", "replace"))[:2048], "setup": setup}
+            if not prerequisite["available"]:
+                record = store.add("runtime", {"tool": "frida", "action": "frida-prerequisite", "package": args.package,
+                                               "device": device, "transport": transport, "success": False,
+                                               "returncode": code, "timed_out": expired,
+                                               "stdout": prerequisite["listing"], "stderr": prerequisite["stderr"],
+                                               "prerequisite": prerequisite})
+                raise ForgeError("Frida prerequisite missing: no reachable hook transport. "
+                                 f"Evidence {record['id']}")
+        if host:
+            command = [launcher, "-H", host, "-n", args.package, "-l", str(path), "-q", "-t", str(args.duration)]
+        else:
+            command = [launcher]
+            command += ["-D", args.device] if args.device else ["-U"]
+            command += ["-n" if args.attach else "-f", args.package, "-l", str(path), "-q", "-t", str(args.duration)]
+        code, stdout, stderr, expired = _run(command, args.duration + 15)
+        text_out = stderr.decode("utf-8", "replace")
+        combined = text_out + stdout.decode("utf-8", "replace")
+        success = code == 0 and not expired
+        guidance = None
+        if not success:
+            if _FRIDA_JAILED.search(combined):
+                guidance = ("jailed Android cannot be spawned: repackage the APK with `apk-gadget` and a matching "
+                            "frida-gadget, sign it with `apk-sign`, or use a rooted device running frida-server")
+            elif _FRIDA_UNREACHABLE.search(combined):
+                guidance = ("no reachable hook transport: start a frida-server on a rooted target, or forward the "
+                            "Gadget port and pass --host HOST:PORT --forward PORT")
+            elif _FRIDA_LAUNCH_REFUSED.search(combined):
+                guidance = "the target refused the session; check process name, debuggability and signature"
+            if guidance:
+                prerequisite["available"] = False
+                prerequisite["reason"] = guidance
+        record = store.add("runtime", {"tool": "frida", "action": "frida-hook", "package": args.package,
+                                       "device": device, "attach": args.attach, "transport": transport,
+                                       "script_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                       "success": success, "returncode": code, "timed_out": expired,
+                                       "stdout": stdout.decode("utf-8", "replace"), "stderr": scrub_text(text_out),
+                                       "prerequisite": prerequisite})
+    finally:
+        if forward_port is not None and adb_tool is not None:
+            _run([adb_tool, "forward", "--remove", f"tcp:{forward_port}"], 15)
     if not success:
         if guidance:
             raise ForgeError(f"Frida session did not start: {guidance}; evidence {record['id']}")
@@ -352,6 +401,8 @@ def register(subparsers):
     parser.add_argument("--component")
     parser.add_argument("--remote", help="Absolute device path for pull/push")
     parser.add_argument("--filter", help="Case-insensitive package-name substring filter for packages")
+    parser.add_argument("--installer", help="Declare the recorded install source with adb -i, for example "
+                                            "com.android.vending")
     parser.add_argument("--third-party", action="store_true", help="Restrict packages to third-party apps")
     parser.add_argument("--system", action="store_true", help="Restrict packages to system apps")
     parser.add_argument("--lines", type=int, default=200)
@@ -364,6 +415,8 @@ def register(subparsers):
     parser.add_argument("--script", required=True)
     parser.add_argument("--device")
     parser.add_argument("--attach", action="store_true")
+    parser.add_argument("--host", help="Attach to a Gadget over HOST:PORT instead of USB, for example 127.0.0.1:27042")
+    parser.add_argument("--forward", type=int, help="Forward this TCP port from the selected device before attaching")
     parser.add_argument("--duration", type=int, default=15)
     parser.set_defaults(handler=frida_hook)
     parser = subparsers.add_parser("native", help="Inspect native metadata, disassembly, xrefs or call graphs with radare2")

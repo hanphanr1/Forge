@@ -26,6 +26,7 @@ MAX_MANIFEST = 4 * 1024 * 1024
 MAX_OUTPUT = 256 * 1024
 MAX_APKS = 128
 NO_INDEX = 0xffffffff
+INSTALLER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+")
 
 
 def _regular_path(root, value):
@@ -603,8 +604,14 @@ def adb_install_splits(args, store):
             if not facts["success"]:
                 raise ForgeError(f"Installation prerequisite missing: {facts['status']}; evidence {preflight['id']}")
             validate_apks([item["manifest"] for item in inputs], facts["device"])
+            declared_installer = getattr(args, "installer", None)
+            if declared_installer and not INSTALLER_NAME.fullmatch(declared_installer):
+                raise ForgeError("--installer must be a package name such as com.android.vending")
             action = "install" if len(paths) == 1 else "install-multiple"
-            command = [facts["adb_path"], "-s", facts["device"]["serial"], action, *map(str, paths)]
+            command = [facts["adb_path"], "-s", facts["device"]["serial"], action]
+            if declared_installer:
+                command += ["-i", declared_installer]
+            command += [str(apk) for apk in paths]
             installer = _run(command, args.timeout)
             complete_output = not installer["stdout_omitted_bytes"] and not installer["stderr_omitted_bytes"]
             success = bool(_ok(installer) and complete_output and not re.search(
@@ -613,7 +620,9 @@ def adb_install_splits(args, store):
                                            "success": success, "inputs": inputs, "archive_sha256": archive_hash,
                                            "device": facts["device"], "preflight_evidence_id": preflight["id"],
                                            "tool_version": facts["tool_version"], "adb_path": facts["adb_path"],
-                                           "policy": "new-install-only; no replace, downgrade or permission grant flags",
+                                           "declared_installer": declared_installer,
+                                           "policy": "new-install-only; no replace, downgrade or permission grant "
+                                                     "flags; --installer only declares the recorded install source",
                                            "installer": installer})
             if not success:
                 raise ForgeError(f"ADB installer failed; evidence {record['id']}")
@@ -704,6 +713,8 @@ def register(subparsers):
     parser.add_argument("paths", nargs="*", help="Ordered APK paths")
     parser.add_argument("--archive", help="Explicit APKS/XAPK archive")
     parser.add_argument("--member", action="append", default=[], help="Exact APK archive member; repeat in order")
+    parser.add_argument("--installer", help="Declare the recorded install source with adb -i, for example "
+                                            "com.android.vending")
     parser.add_argument("--validate-selection", action="store_true",
                         help="Also check the set as one installable split selection")
     parser.set_defaults(handler=apk_info)
