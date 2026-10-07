@@ -131,10 +131,11 @@ forge --project target apk-decode client.apk --output decoded
 forge --project target apk-manifest decoded
 forge --project target apk-rebuild decoded --output rebuilt.apk
 forge --project target apk-sign rebuilt.apk --output signed.apk --debug-keystore
+forge --project target apk-gadget client.apk --gadget frida-gadget-17.22.1-android-arm64.so --output gadget.apk
 forge --project target adb install --serial "<observed-serial>" --path signed.apk
 ```
 
-`apk-decode` runs apktool into a new project-local directory and only reports success when the decoded `AndroidManifest.xml` exists. `apk-manifest` summarizes declared permissions, components with their `android:exported` value, intent filters and deeplinks from a decoded directory, a decoded manifest, or a raw APK. `apk-rebuild` produces unsigned bytes that are not installable until `apk-sign` succeeds. `apk-sign` runs zipalign, apksigner and a verification pass, requires either `--keystore`/`--alias` with password environment variables or an explicit `--debug-keystore`, and never publishes output that fails verification. See [APK patching](apk-patching.md).
+`apk-decode` runs apktool into a new project-local directory and only reports success when the decoded `AndroidManifest.xml` exists. `apk-manifest` summarizes declared permissions, components with their `android:exported` value, intent filters and deeplinks from a decoded directory, a decoded manifest, or a raw APK. `apk-rebuild` produces unsigned bytes that are not installable until `apk-sign` succeeds. `apk-sign` runs zipalign, apksigner and a verification pass, requires either `--keystore`/`--alias` with password environment variables or an explicit `--debug-keystore`, and never publishes output that fails verification. `apk-gadget` repackages an APK with a Frida Gadget for a device without root: it reads the ABI from the Gadget's ELF header, requires the injected members and the embedded Gadget hash to match, refuses a changed package name, and records that the result is debuggable with a replaced signature. Gadget config values stay out of evidence. See [APK patching](apk-patching.md).
 
 ## iOS boundary
 

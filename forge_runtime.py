@@ -283,8 +283,8 @@ def frida_hook(args, store):
         prerequisite = {"checked": True, "available": code == 0 and not expired, "returncode": code,
                         "timed_out": expired, "listing": stdout.decode("utf-8", "replace")[:4096],
                         "stderr": scrub_text(stderr.decode("utf-8", "replace"))[:2048],
-                        "setup": "Android also needs a reachable frida-server (root) or a repackaged Gadget build; a "
-                                 "jailed device cannot be spawned without one"}
+                        "setup": "Android also needs a reachable frida-server (root) or a repackaged Gadget build "
+                                 "(`apk-gadget` then `apk-sign`); a jailed device cannot be spawned without one"}
         if not prerequisite["available"]:
             record = store.add("runtime", {"tool": "frida", "action": "frida-prerequisite", "package": args.package,
                                            "device": device, "success": False, "returncode": code,
@@ -302,8 +302,8 @@ def frida_hook(args, store):
     guidance = None
     if not success:
         if _FRIDA_JAILED.search(combined):
-            guidance = ("jailed Android cannot be spawned: repackage the APK with a matching frida-gadget, or use a "
-                        "rooted device running frida-server")
+            guidance = ("jailed Android cannot be spawned: repackage the APK with `apk-gadget` and a matching "
+                        "frida-gadget, sign it with `apk-sign`, or use a rooted device running frida-server")
         elif _FRIDA_UNREACHABLE.search(combined):
             guidance = "no reachable frida-server on the device; start one on a rooted target or use --device/--attach"
         elif _FRIDA_LAUNCH_REFUSED.search(combined):

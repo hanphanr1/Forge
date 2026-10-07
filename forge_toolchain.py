@@ -24,6 +24,11 @@ TOOLS = {
         "local": ("frida/Scripts/frida.exe", "frida/bin/frida"),
         "setup": "Install frida-tools in FORGE/tools/frida venv or set FORGE_FRIDA; Android also needs device-side setup",
     },
+    "frida_apk": {
+        "env": "FORGE_FRIDA_APK", "command": "frida-apk",
+        "local": ("frida/Scripts/frida-apk.exe", "frida/bin/frida-apk"),
+        "setup": "frida-apk ships with frida-tools; install it in FORGE/tools/frida venv or set FORGE_FRIDA_APK",
+    },
     "r2": {
         "env": "FORGE_R2", "command": "r2",
         "local": ("radare2/bin/radare2.exe", "radare2/bin/r2.exe", "radare2/radare2.exe",

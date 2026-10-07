@@ -1,9 +1,12 @@
-"""APK decode, manifest summary, rebuild and signing for authorized patch work.
+"""APK decode, manifest summary, rebuild, signing and Gadget repackaging for authorized patch work.
 
 Every command here works on explicitly supplied project-local inputs, refuses to
 overwrite existing outputs and records what actually ran. Nothing is downloaded,
 and no signing identity is invented silently: the caller either supplies a
-keystore or explicitly asks for a local debug key.
+keystore or explicitly asks for a local debug key. Gadget repackaging is the only
+Frida route that works on a device without root, and it records the changes that
+route forces on the build (debuggable flag, replaced signature) instead of
+presenting the result as the original app.
 """
 
 from __future__ import annotations
@@ -13,10 +16,12 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import uuid
 import xml.etree.ElementTree as ET
+import zipfile
 
 from forge_core import ForgeError, scrub_text
 from forge_toolchain import find_tool
@@ -29,6 +34,17 @@ MAX_VALIDITY_DAYS = 3650
 DEBUG_ALIAS = "androiddebugkey"
 DEBUG_PASSWORD = "android"
 COMPONENT_TAGS = {"activity", "activity-alias", "service", "receiver", "provider"}
+GADGET_NAME = "libfridagadget.so"
+GADGET_CONFIG_NAME = "libfridagadget.config.so"
+WRAP_NAME = "wrap.sh"
+MAX_GADGET = 64 * 1024 * 1024
+GADGET_ABIS = {3: "x86", 40: "armeabi-v7a", 62: "x86_64", 183: "arm64-v8a", 243: "riscv64"}
+_GADGET_SCOPE = ("Gadget repackaging sets android:debuggable=true, adds lib/<abi>/wrap.sh, libfridagadget.so and its "
+                 "config, and replaces the original signature. Installing it needs a signed APK and removing any "
+                 "installed copy of the same package, which deletes that app's data. The debuggable flag and the new "
+                 "signature are visible to the app, so integrity, tamper and anti-fraud checks may refuse or answer "
+                 "differently: hook output from this build is evidence about a modified build, not about the official "
+                 "one.")
 
 
 def _input(store, value, suffix=None):
@@ -106,6 +122,68 @@ def _staged(store, source):
     staged = directory / source.name
     digest, size = _copy_bounded(source, staged)
     return directory, staged, digest, size
+
+
+def _hash_file(path):
+    digest, size = hashlib.sha256(), 0
+    with path.open("rb") as reader:
+        for block in iter(lambda: reader.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    return digest.hexdigest(), size
+
+
+def _gadget_abi(path, size):
+    if size > MAX_GADGET:
+        raise ForgeError(f"Gadget exceeds the {MAX_GADGET} byte cap; supply one frida-gadget shared object")
+    with path.open("rb") as reader:
+        header = reader.read(20)
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise ForgeError("Gadget must be an ELF shared object such as frida-gadget-<version>-android-arm64.so")
+    elf_class = header[4]
+    kind = struct.unpack_from("<H", header, 16)[0]
+    machine = struct.unpack_from("<H", header, 18)[0]
+    if elf_class not in (1, 2):
+        raise ForgeError("Gadget has an invalid ELF class byte")
+    if kind != 3:
+        raise ForgeError("Gadget must be a shared object (ET_DYN); an executable will not load as a gadget")
+    abi = GADGET_ABIS.get(machine)
+    if abi is None:
+        raise ForgeError(f"Gadget targets machine 0x{machine:02x}, which is not a supported Android ABI")
+    return abi, 64 if elf_class == 2 else 32
+
+
+def _member_digest(archive, name):
+    digest = hashlib.sha256()
+    with archive.open(name) as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _package_name(path):
+    try:
+        import forge_android
+        return forge_android.inspect_apk(path)["package"]
+    except (ForgeError, OSError, KeyError):
+        return None
+
+
+def _inspect_gadget_output(path, abi):
+    required = [f"lib/{abi}/{GADGET_NAME}", f"lib/{abi}/{WRAP_NAME}", f"lib/{abi}/{GADGET_CONFIG_NAME}"]
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = {entry.filename for entry in archive.infolist()}
+            missing = [name for name in required if name not in names]
+            if "AndroidManifest.xml" not in names:
+                missing.append("AndroidManifest.xml")
+            if missing:
+                raise ForgeError("Repackaged APK is missing " + ", ".join(sorted(missing)))
+            embedded = _member_digest(archive, f"lib/{abi}/{GADGET_NAME}")
+            count = len(names)
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
+        raise ForgeError(f"Repackaged APK is not a readable archive: {error}") from error
+    return embedded, count, _package_name(path)
 
 
 def decode(args, store):
@@ -363,6 +441,75 @@ def sign(args, store):
     return record
 
 
+def gadget(args, store):
+    source = _input(store, args.path)
+    if not source.is_file() or source.suffix.lower() != ".apk":
+        raise ForgeError("apk-gadget requires one regular project-local .apk input")
+    shared_object = _input(store, args.gadget)
+    if not shared_object.is_file() or shared_object.suffix.lower() != ".so":
+        raise ForgeError("Provide one project-local frida-gadget shared object with --gadget")
+    gadget_digest, gadget_size = _hash_file(shared_object)
+    abi, bitness = _gadget_abi(shared_object, gadget_size)
+    config = []
+    for item in args.gadget_config or []:
+        key, separator, value = item.partition("=")
+        key = key.strip()
+        if not separator or not key or not value:
+            raise ForgeError("--gadget-config expects KEY=VALUE, for example on_load=wait")
+        config.append((key, value))
+    output = _new_output(store, args.output, suffix=".apk", label="Gadget APK")
+    tool = _tool("frida_apk")
+    package_before = _package_name(source)
+    staging = Path(tempfile.mkdtemp(prefix="forge-apk-gadget-", dir=store.directory))
+    staged = staging / "gadget.apk"
+    command = [tool["path"], "-g", str(shared_object), "-o", str(staged)]
+    for key, value in config:
+        command += ["-c", f"{key}={value}"]
+    command.append(str(source))
+    embedded = package_after = None
+    entry_count = 0
+    failure = None
+    digest = size = None
+    try:
+        code, stdout, stderr, expired = _run(command, args.timeout)
+        produced = code == 0 and not expired and staged.is_file()
+        if not produced:
+            failure = "frida-apk did not produce an APK"
+        else:
+            try:
+                embedded, entry_count, package_after = _inspect_gadget_output(staged, abi)
+            except ForgeError as error:
+                failure = str(error)
+        if failure is None and embedded != gadget_digest:
+            failure = "The gadget inside the repackaged APK does not match the supplied shared object"
+        if failure is None and package_before and package_after and package_before != package_after:
+            failure = f"Repackaging changed the package name ({package_before} -> {package_after})"
+        success = failure is None
+        if success:
+            digest, size = _copy_bounded(staged, output)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    record = store.add("analysis", {"schema": SCHEMA, "tool": "frida-apk", "action": "apk-gadget",
+                                    "input": _relative(store, source), "gadget": _relative(store, shared_object),
+                                    "output_path": _relative(store, output), "executable": tool["path"],
+                                    "tool_source": tool["source"], "success": success, "failure": failure,
+                                    "returncode": code, "timed_out": expired,
+                                    "gadget_sha256": gadget_digest, "gadget_size": gadget_size, "gadget_abi": abi,
+                                    "gadget_bitness": bitness, "config_keys": [key for key, _ in config],
+                                    "package_before": package_before, "package_after": package_after,
+                                    "embedded_gadget_matches": embedded == gadget_digest,
+                                    "injected_members": [f"lib/{abi}/{GADGET_NAME}", f"lib/{abi}/{WRAP_NAME}",
+                                                         f"lib/{abi}/{GADGET_CONFIG_NAME}"],
+                                    "archive_entries": entry_count,
+                                    "sha256": digest, "size": size,
+                                    "stdout": scrub_text(stdout.decode("utf-8", "replace")),
+                                    "stderr": scrub_text(stderr.decode("utf-8", "replace")),
+                                    "scope": _GADGET_SCOPE})
+    if not success:
+        raise ForgeError(f"apk-gadget failed: {failure}; evidence {record['id']}")
+    return record
+
+
 def register(subparsers):
     parser = subparsers.add_parser("apk-decode", help="Decode an APK into project-local sources and resources with apktool")
     parser.add_argument("path")
@@ -383,6 +530,15 @@ def register(subparsers):
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--timeout", type=float, default=900)
     parser.set_defaults(handler=rebuild)
+
+    parser = subparsers.add_parser("apk-gadget", help="Repackage an APK with a Frida Gadget for hooking without root")
+    parser.add_argument("path")
+    parser.add_argument("--gadget", required=True, help="Project-local frida-gadget .so matching the device ABI")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--gadget-config", action="append", default=[], metavar="KEY=VALUE",
+                        help="Gadget interaction option; values stay in the APK and out of evidence")
+    parser.add_argument("--timeout", type=float, default=600)
+    parser.set_defaults(handler=gadget)
 
     parser = subparsers.add_parser("apk-sign", help="Zipalign and sign a rebuilt APK, then verify the signature")
     parser.add_argument("path")

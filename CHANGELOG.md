@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 - 2026-10-07
+
+- New `apk-gadget` action: repackages an APK with a Frida Gadget through `frida-apk`, which is the only Frida route on a device without root. `frida-server` needs root, so a jailed target has no other dynamic option.
+- ABI, bitness and Gadget identity come from bytes: FORGE reads `e_machine`/`e_class` from the Gadget's ELF header, refuses an executable or an unknown machine, and after the run requires the injected members, the embedded Gadget hash and an unchanged package name. A mismatch fails the run and is recorded with its reason.
+- The repackaged build is described honestly in evidence and docs: `android:debuggable=true` is forced, the original signature is replaced, the default interaction blocks at launch until a client connects, and integrity, tamper and anti-fraud checks can see all of it. Hook output from such a build describes a modified build.
+- Gadget config values stay in the APK and out of evidence; only the keys are recorded.
+- `frida-apk` joins the toolchain resolution (`FORGE_FRIDA_APK`), bundle projections carry the new action, and the `frida` prerequisite guidance now points at `apk-gadget` plus `apk-sign` instead of describing the work without naming it.
+- First tests for the APK patch loop: `tests/test_apktool.py` covers Gadget validation, injection verification, failure recording and staging cleanup.
+
 ## 0.6.0 - 2026-10-07
 
 - New `native decompile` action: retains radare2 `pdc` output as bounded register-level pseudo-C in evidence, with `--address`/entrypoint selection like `disasm`.
