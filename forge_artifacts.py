@@ -26,6 +26,7 @@ import zlib
 
 from forge_core import ForgeError, redact, redact_url, scrub_text, utc_now
 from forge_toolchain import find_tool, java_environment
+from forge_java_trace import trace_source
 
 CHUNK = 64 * 1024
 ARCHIVES = {".zip", ".apk", ".apks", ".xapk", ".whl"}
@@ -609,7 +610,8 @@ def android_api_map(args, store):
             ("max-source-files", args.max_source_files, 500000),
             ("max-source-bytes", args.max_source_bytes, 2 * 1024 * 1024 * 1024),
             ("max-source-file-bytes", args.max_source_file_bytes, 128 * 1024 * 1024),
-            ("max-occurrences", args.max_occurrences, 100000)):
+            ("max-occurrences", args.max_occurrences, 100000),
+            ("max-trace-items", args.max_trace_items, 100000)):
         if type(value) is not int or not 1 <= value <= maximum:
             raise ForgeError(f"--{name} must be an integer from 1 to {maximum}")
     source_filters = []
@@ -695,6 +697,9 @@ def android_api_map(args, store):
     matches = {key: [] for key in candidates}
     source_files_scanned = source_bytes_scanned = source_files_omitted = source_bytes_omitted = 0
     source_occurrences = source_occurrences_omitted = 0
+    source_traces = {key: [] for key in candidates}
+    trace_items = trace_items_omitted = 0
+    trace_truncated = False
     source_truncated = False
     stop = False
     for directory, dirs, files in os.walk(source_root, followlinks=False):
@@ -746,8 +751,10 @@ def android_api_map(args, store):
             source_bytes_scanned += len(content)
             if url_pattern is None:
                 continue
-            lines = content.decode("utf-8", "replace").splitlines()
+            text = content.decode("utf-8", "replace")
+            lines = text.splitlines()
             file_hits = {}
+            trace_hits = {}
             for line_number, line in enumerate(lines, 1):
                 for found in url_pattern.finditer(line):
                     key = by_folded_url.get(found.group().casefold())
@@ -759,6 +766,7 @@ def android_api_map(args, store):
                         stop = True
                         break
                     file_hits.setdefault(key, set()).add(line_number)
+                    trace_hits.setdefault(key, []).append((line_number, found.start() + 1))
                     source_occurrences += 1
                 if stop:
                     break
@@ -770,6 +778,29 @@ def android_api_map(args, store):
                     matches[key].extend({"path": relative, "class_name": class_name, "line": number,
                                          "source_sha256": file_sha256}
                                         for number in sorted(line_numbers))
+                remaining = args.max_trace_items - trace_items
+                if remaining:
+                    if source_file.suffix.lower() == ".java":
+                        traced = trace_source(text, trace_hits, remaining)
+                    else:
+                        roots = [(key, line, column) for key, positions in trace_hits.items()
+                                 for line, column in positions]
+                        traced = {"traces": {}, "items": min(remaining, len(roots)),
+                                  "omitted": max(0, len(roots) - remaining),
+                                  "truncated": len(roots) > remaining}
+                        for key, line, column in roots[:remaining]:
+                            traced["traces"].setdefault(key, []).append({
+                                "literal_line": line, "literal_column": column, "context_kind": "unsupported"})
+                    for key, traces in traced["traces"].items():
+                        source_traces[key].extend({
+                            **trace, "path": relative, "class_name": class_name, "source_sha256": file_sha256}
+                            for trace in traces)
+                    trace_items += traced["items"]
+                    trace_items_omitted += traced["omitted"]
+                    trace_truncated |= traced["truncated"]
+                else:
+                    trace_items_omitted += sum(len(positions) for positions in trace_hits.values())
+                    trace_truncated = True
             if stop:
                 break
         if stop:
@@ -781,7 +812,8 @@ def android_api_map(args, store):
                                "url_sha256": hashlib.sha256(raw_url.encode("utf-8")).hexdigest(),
                                "category": "static_candidate", "dex_locations": item["dex_locations"],
                                "source_occurrences": matches[key],
-                               "source_occurrence_count": len(matches[key])})
+                               "source_occurrence_count": len(matches[key]),
+                               "source_traces": source_traces[key]})
     return store.add("analysis", {
         "schema": "forge.android-api-map/v1", "tool": "android", "action": "api-map",
         "success": True, "index_evidence_id": index_record["id"], "jadx_evidence_id": jadx_record["id"],
@@ -793,11 +825,15 @@ def android_api_map(args, store):
         "source_bytes_scanned": source_bytes_scanned, "source_files_omitted": source_files_omitted,
         "source_bytes_omitted": source_bytes_omitted, "source_occurrence_count": source_occurrences,
         "source_occurrences_omitted": source_occurrences_omitted,
+        "trace_items": trace_items, "trace_items_omitted": trace_items_omitted,
+        "trace_truncated": trace_truncated,
         "api_candidates": api_candidates,
-        "truncated": truncated or source_truncated,
+        "truncated": truncated or source_truncated or trace_truncated,
         "scope": "Static mapping only: a URL string and matching decompiled source literal do not prove a "
-                 "request builder dispatches it, the app executed it, or a server accepted it. Inspect caller "
-                 "logic and correlate with captured/live HTTP before treating it as an API flow."
+                 "request builder dispatches it, the app executed it, or a server accepted it. Java traces "
+                 "are same-file syntactic candidates, not a type-resolved call graph or dataflow analysis. "
+                 "Request markers only co-occur in the enclosing method. Inspect caller logic and correlate "
+                 "with captured/live HTTP before treating it as an API flow."
     })
 
 
@@ -972,6 +1008,8 @@ def register(subparsers):
     parser.add_argument("--max-source-bytes", type=_positive, default=512 * 1024 * 1024)
     parser.add_argument("--max-source-file-bytes", type=_positive, default=16 * 1024 * 1024)
     parser.add_argument("--max-occurrences", type=_positive, default=10000)
+    parser.add_argument("--max-trace-items", type=_positive, default=10000,
+                        help="Shared cap for Java trace roots, bindings, field uses, callers and markers")
     parser.set_defaults(handler=android_api_map)
 
     parser = subparsers.add_parser("jadx", help="Run installed JADX with project-local output and saved execution evidence")

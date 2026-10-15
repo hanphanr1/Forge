@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0 - 2026-10-15
+
+- `android-api-map` now adds same-file Java `source_traces`: method contexts, direct String field initializers, unique same-arity constructor-parameter field assignments, field reads, and one-hop caller-name candidates. Literal, declaration and assignment lines retain the source hash.
+- Trace parsing ignores calls and braces inside strings/comments, excludes nested/local/anonymous class bodies from outer-class attribution, and leaves ambiguous constructor bindings unresolved. Caller overload counts and lexical request markers stay explicit; neither is a resolved call or proof of HTTP traffic.
+- `--max-trace-items` bounds retained trace roots, bindings, reads, callers and markers across source files. Truncation and lower-bound omitted counts are exposed. Bundle projection keeps structural citations but withholds method/field/parameter names and local source paths.
+- Exercised on the previously pulled Grok 1.2.45 build: 13 constructor-literal bindings to fields and 54 same-class field-read sites in `e5.c`. No request markers or reverse callers were found there; no live API call was claimed.
+
 ## 0.11.0 - 2026-10-15
 
 - New `android-api-map` joins a cited DEX static index with cited successful/partial JADX output. It verifies the index SHA-256, scans bounded Java/Kotlin/smali sources, and maps each URL string to exact class/line/source-hash occurrences. `--class-filter` narrows the scan when the class is already known.

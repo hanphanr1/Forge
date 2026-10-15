@@ -75,6 +75,16 @@ class BundleTests(unittest.TestCase):
             "api_candidates": [{"url": "https://api.example.test/login?token=private-url-token",
                                 "category": "static_candidate",
                                 "dex_locations": [{"dex_member": "classes.dex", "byte_offset": 19}],
+                                "source_traces": [{
+                                    "path": ".forge/analysis/jadx/private/e5/c.java",
+                                    "class_name": "e5.c", "source_sha256": "b" * 64,
+                                    "literal_line": 20, "context_kind": "method",
+                                    "method_name": "privateMethodName", "method_line": 18,
+                                    "field_links": [{
+                                        "field_name": "privateFieldName", "parameter_name": "privateParamName",
+                                        "assignment_line": 21, "resolution": "syntactic_constructor_binding",
+                                        "uses": [{"line": 31, "method_name": "privateUseName",
+                                                  "request_markers": [{"line": 32, "marker_kind": "url_call"}]}]}]}],
                                 "source_occurrences": [{"path": ".forge/analysis/jadx/private/e5/c.java",
                                                         "class_name": "e5.c", "line": 20,
                                                         "source_sha256": "b" * 64}]}]})
@@ -95,6 +105,11 @@ class BundleTests(unittest.TestCase):
         self.assertNotIn("pulled/app/base.apk", packed)
         self.assertNotIn("private-session-token", packed)
         self.assertNotIn("private screen content", packed)
+        self.assertIn('"literal_line": 20', packed)
+        self.assertIn("syntactic_constructor_binding", packed)
+        self.assertIn("url_call", packed)
+        for private_name in ("privateMethodName", "privateFieldName", "privateParamName", "privateUseName"):
+            self.assertNotIn(private_name, packed)
 
     def test_transitive_controls_are_cited_and_archive_content_hashes_match(self):
         positive = self.store.add("target_run", {"control": "positive", "bucket": "FREE", "success": True, "runtime_before": {"sha256": "a" * 64, "size": 123}})

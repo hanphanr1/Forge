@@ -29,6 +29,10 @@ _ENUMS = {
     "category": {"static_candidate", "captured_http", "live_http"},
     "source": {"static_candidate", "captured_http", "live_http", "live_probe", "har_import", "local_import"},
     "member_filter": {"dex"},
+    "context_kind": {"method", "field_initializer", "class_scope", "comment", "unsupported"},
+    "resolution": {"syntactic_constructor_binding", "direct_field_initializer",
+                   "same_class_field_candidate", "same_class_name_candidate"},
+    "marker_kind": {"url_call", "dispatch_call", "retrofit_annotation"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
              "idevice_id", "idevicepair"},
@@ -43,6 +47,12 @@ _ENUMS = {
                "observed", "paired", "not-paired", "unknown"},
 }
 _CONTAINERS = {"sources_before", "sources_after", "current_sources", "files", "facts", "package_facts", "manifest", "api_candidates", "dex_locations", "source_occurrences", "binary", "binary_before", "binary_after", "runtime", "runtime_before", "runtime_after", "runtime_current", "fingerprint", "executable", "before", "after", "limits", "selection", "map", "identity", "endpoints", "observations", "before_observations", "after_observations", "before_scope", "after_scope", "citations", "location", "request", "response", "device", "devices", "counts", "summary", "changes", "added", "removed", "changed", "planned", "deleted", "filters", "invocation"}
+_PRIVATE |= {"method_name", "field_name", "parameter_name"}
+_FLAGS |= {"trace_truncated"}
+_NUMBERS |= {"trace_items", "trace_items_omitted", "literal_line", "literal_column",
+             "method_line", "method_end_line", "constructor_line", "argument_index",
+             "assignment_line", "overload_count"}
+_CONTAINERS |= {"source_traces", "field_links", "uses", "callers", "request_markers"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",

@@ -101,6 +101,32 @@ class AndroidApiMapTests(unittest.TestCase):
         self.assertEqual(occurrence_limited["source_occurrences_omitted"], 1)
         self.assertTrue(occurrence_limited["truncated"])
 
+    def test_trace_budget_is_shared_across_source_files(self):
+        second = self.source_root / "sources" / "other" / "Client.java"
+        second.write_text(
+            'package other; class Client { String endpoint = "https://api.example.test/v1/login"; }',
+            encoding="utf-8")
+        data = self.run_map("--max-trace-items", "1")["data"]
+        traces = [trace for candidate in data["api_candidates"] for trace in candidate["source_traces"]]
+        self.assertEqual(data["source_occurrence_count"], 3)
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(data["trace_items"], 1)
+        self.assertGreaterEqual(data["trace_items_omitted"], 2)
+        self.assertTrue(data["trace_truncated"])
+        self.assertTrue(data["truncated"])
+
+    def test_kotlin_literals_remain_cited_without_java_resolution(self):
+        source = self.source_root / "sources" / "other" / "Client.kt"
+        source.write_text('fun login() = "https://api.example.test/v1/login"\n', encoding="utf-8")
+        data = self.run_map("--class-filter", "other.Client")["data"]
+        login = next(candidate for candidate in data["api_candidates"] if "/v1/login" in candidate["url"])
+        self.assertEqual(login["source_traces"][0]["context_kind"], "unsupported")
+        self.assertEqual(login["source_traces"][0]["literal_line"], 1)
+        self.assertEqual(login["source_traces"][0]["source_sha256"],
+                         hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertNotIn("method_name", login["source_traces"][0])
+        self.assertFalse(data["trace_truncated"])
+
     def test_wrong_evidence_kinds_are_refused(self):
         claim = self.store.add("claim", {"text": "not an index"})
         args = self.parser.parse_args(["android-api-map", "--index-evidence", claim["id"],

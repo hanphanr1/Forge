@@ -44,8 +44,8 @@ from the device; it does not authenticate the publisher.
 
 To find API strings without indexing archive resources first, run `artifact-index` on the pulled
 base APK with `--dex`, then `search` the returned index. The index keeps each DEX member and byte
-offset. When JADX output exists, `android-api-map` links those candidates to exact source literal
-occurrences and class/line locations. It does not prove a caller dispatches the request.
+offset. When JADX output exists, `android-api-map` links those candidates to source literal
+occurrences, class/line/hash citations and bounded same-file Java traces. It does not prove dispatch.
 
 ```console
 mkdir installed
@@ -72,6 +72,25 @@ same host can instead POST the HAR to the loopback-only `capture-ingest` listene
 `api-shape` and `protocol-map` to inspect captured names and citations. ADB observation does not
 decrypt TLS, install a trust certificate, bypass certificate pinning, or prove that an endpoint
 belongs to the app. Unmatched or unobserved fields remain unknown.
+
+### Follow a Java literal without a device
+
+The same `android-api-map` command now emits `source_traces`. For a literal passed as the entire
+argument of an unqualified `new ClassName(...)`, it can link that argument to a unique same-arity
+constructor parameter, a direct `this.field = parameter` assignment, and field reads in the same
+class. Direct String field initializers and literals in methods are also traced.
+
+Each trace root carries its source path/hash and literal line/column. Method and assignment lines
+let the agent open the cited source instead of searching the entire tree again. `callers` means
+one-hop reverse name matches in that class; overload counts remain explicit. Request markers
+describe lexical co-occurrence in a method, not that the URL reaches a network client.
+
+The parser excludes nested/local/anonymous class bodies from outer-class attribution and only
+traces the first top-level Java type. It is not a Java compiler, type resolver or inter-file
+callgraph. Kotlin/smali and malformed source remain literal citations with unsupported traces.
+`--max-trace-items` caps all retained trace objects across files; inspect `trace_truncated` and
+`trace_items_omitted` before interpreting an empty result. This step requires neither root nor
+Frida and makes no device changes.
 
 ## Install a selected APK set
 
