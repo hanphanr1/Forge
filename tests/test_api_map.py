@@ -84,6 +84,23 @@ class AndroidApiMapTests(unittest.TestCase):
                             for candidate in data["api_candidates"]
                             for item in candidate["source_occurrences"]))
 
+
+    def test_candidate_source_file_and_occurrence_caps_are_reported(self):
+        candidate_limited = self.run_map("--max-candidates", "1")["data"]
+        self.assertEqual(candidate_limited["candidate_count"], 1)
+        self.assertEqual(candidate_limited["candidate_omitted"], 1)
+        self.assertTrue(candidate_limited["truncated"])
+
+        file_limited = self.run_map("--max-source-files", "1")["data"]
+        self.assertEqual(file_limited["source_files_scanned"], 1)
+        self.assertEqual(file_limited["source_files_omitted"], 1)
+        self.assertTrue(file_limited["truncated"])
+
+        occurrence_limited = self.run_map("--class-filter", "e5.c", "--max-occurrences", "1")["data"]
+        self.assertEqual(occurrence_limited["source_occurrence_count"], 1)
+        self.assertEqual(occurrence_limited["source_occurrences_omitted"], 1)
+        self.assertTrue(occurrence_limited["truncated"])
+
     def test_wrong_evidence_kinds_are_refused(self):
         claim = self.store.add("claim", {"text": "not an index"})
         args = self.parser.parse_args(["android-api-map", "--index-evidence", claim["id"],

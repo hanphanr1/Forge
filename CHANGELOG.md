@@ -5,6 +5,7 @@
 - New `android-api-map` joins a cited DEX static index with cited successful/partial JADX output. It verifies the index SHA-256, scans bounded Java/Kotlin/smali sources, and maps each URL string to exact class/line/source-hash occurrences. `--class-filter` narrows the scan when the class is already known.
 - The report links both input evidence records and labels results `static_candidate`. A literal in a decompiled class is **not** proof a caller dispatches it, the app sent it, or the server accepted it. Source paths and code excerpts are not exported in bundles.
 - Exercised on the installed Grok 1.2.45 build: 195 candidate URLs from the DEX index; filtering to `e5.c` scanned one Java file and mapped 13 URL literals to line 20. No live API call was claimed; no HAR capture was available.
+- Agent routing now uses the installed Android build, DEX-first indexing, and `android-api-map` before broad decompilation, while keeping candidate strings separate from live API proof.
 - Tests cover evidence-kind validation, index hash mismatch, bounded class filtering, source line/hash citations and bundle projection.
 
 ## 0.10.0 - 2026-10-15
