@@ -264,11 +264,9 @@ class RuntimeActionTests(unittest.TestCase):
                 return result("PID NAME\n")
             return result("1700000000\n")
 
-        with patch.object(forge_runtime, "_run", side_effect=self.run_with(no_process)):
-            args = self.parser.parse_args(["adb", "observe", "--serial", self.serial,
-                                           "--package", "com.example.app", "--seconds", "2"])
-            with self.assertRaisesRegex(ForgeError, "Target app is not running"):
-                args.handler(args, self.store)
+        with self.assertRaisesRegex(ForgeError, "Target app is not running"):
+            self.invoke(no_process, "adb", "observe", "--serial", self.serial,
+                        "--package", "com.example.app", "--seconds", "2")
         self.assertFalse(self.last_record("observe")["success"])
 
     def test_observe_ui_snapshots_are_opt_in_and_remote_files_are_removed(self):
