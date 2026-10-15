@@ -146,7 +146,74 @@ def _planned(directory, name, label):
         raise ForgeError(f"{label} already exists ({name}); give each run a new --path directory")
     return destination
 
+BUILTIN_SCRIPT = r'''/*
+ * FORGE trust bypass for a locally repackaged, debuggable build.
+ *
+ * The app trusts system CAs only, so the user-installed capture CA is refused and PCAPdroid cannot
+ * decrypt anything. This script hooks the Java TLS decision points to accept the chain as-is while a
+ * capture runs. It proves nothing about the official build: it runs inside the re-signed repackage
+ * that FORGE's apk-gadget produced, and it applies in-process only. Every hook sends a marker so the
+ * run can show which ones actually attached.
+ *
+ * checkTrustedRecursive is deliberately not overridden: its callers use the return value as a typed
+ * chain and replacing it breaks Conscrypt's own verification path.
+ */
+Java.perform(function () {
+    var X509TrustManager = Java.use('javax.net.ssl.X509TrustManager');
+    var SSLContext = Java.use('javax.net.ssl.SSLContext');
 
+    var Permissive = Java.registerClass({
+        name: 'forge.PermissiveTrustManager',
+        implements: [X509TrustManager],
+        methods: {
+            checkClientTrusted: function () { },
+            checkServerTrusted: function () { },
+            getAcceptedIssuers: function () { return []; }
+        }
+    });
+    var managers = [Permissive.$new()];
+
+    var init = SSLContext.init.overload('[Ljavax.net.ssl.KeyManager;',
+                                        '[Ljavax.net.ssl.TrustManager;',
+                                        'java.security.SecureRandom');
+    init.implementation = function (keyManagers, trustManagers, secureRandom) {
+        send('ssl-context-init-replaced');
+        return init.call(this, keyManagers, managers, secureRandom);
+    };
+
+    function noop(name) {
+        try {
+            var pinner = Java.use('okhttp3.CertificatePinner');
+            pinner[name].overloads.forEach(function (overload) {
+                overload.implementation = function () { send('certificate-pinner-' + name); };
+            });
+        } catch (error) { }
+    }
+    noop('check$okhttp');
+    noop('check');
+
+    try {
+        var TrustManagerImpl = Java.use('com.android.org.conscrypt.TrustManagerImpl');
+        TrustManagerImpl.verifyChain.overloads.forEach(function (overload) {
+            overload.implementation = function () {
+                send('conscrypt-verify-chain');
+                return arguments[0];
+            };
+        });
+    } catch (error) { }
+    try {
+        var ConscryptEngine = Java.use('com.android.org.conscrypt.ConscryptEngineSocket');
+        ConscryptEngine.verifyCertificateChain.overloads.forEach(function (overload) {
+            overload.implementation = function () {
+                send('conscrypt-engine-verify');
+                return arguments[0];
+            };
+        });
+    } catch (error) { }
+
+    send('forge-trust-bypass-loaded');
+});
+'''
 def _builtin_script():
     """The shipped trust-bypass script: next to the module, or in the installed data directory."""
     candidates = []
@@ -166,9 +233,22 @@ def _builtin_script():
     return None, candidates
 
 
-def _script(store, value):
+def _materialize_builtin(directory):
+    """Write the embedded trust-bypass script into the session directory and return it.
+
+    The wheel has no data directory, so the embedded copy is the source of truth; the
+    module-sibling file wins when it exists (development checkout)."""
+    destination = Path(directory) / SCRIPT_NAME
+    if not destination.is_file():
+        destination.write_text(BUILTIN_SCRIPT, encoding="utf-8", newline="\n")
+    return destination
+
+
+def _script(store, value, session=None):
     if value in (None, "", BUILTIN):
         path, candidates = _builtin_script()
+        if path is None and session is not None:
+            path = _materialize_builtin(session)
         if path is None:
             tried = ", ".join(str(item) for item in candidates) or "no candidate path"
             raise ForgeError(f"The shipped {SCRIPT_NAME} was not found ({tried}); pass --script with a project-local "
@@ -224,7 +304,7 @@ def _paths(args, store):
     splits = [_local_file(store, value, f"split APK {value!r}", ".apk") for value in apks[1:]]
     gadget = _local_file(store, args.gadget, "--gadget", ".so")
     session = _session_directory(store, args.path)
-    script, script_source = _script(store, args.script)
+    script, script_source = _script(store, args.script, session)
     return {"base": base, "splits": splits, "gadget": gadget, "session": session, "script": script,
             "script_source": script_source, "script_sha256": _hash_file(script),
             "gadget_apk": _planned(session, GADGET_APK_NAME, "The Gadget APK"),
