@@ -14,7 +14,7 @@ To retain a view for later comparison, use `protocol-snapshot` with the same sel
 
 ## Evidence selection
 
-Without `--evidence`, the command selects the newest relevant records, ordered by creation time and then database insertion order. Relevant kinds are `http_probe`, `har_exchange`, `search`, and `analysis` whose `data.tool` is `static_index`. HTTP records must also have the matching `data.source` (`live_probe` or `har_import`); inconsistent provenance is rejected rather than promoted to live evidence. It filters relevance **before** applying `--limit`, so newer checkpoints, task events, and other analysis records do not hide captures. One additional relevant record is fetched to detect a truncated window.
+Without `--evidence`, the command selects the newest relevant records, ordered by creation time and then database insertion order. Relevant kinds are `http_probe`, `har_exchange`, `search`, `analysis` whose `data.tool` is `static_index`, `analysis` whose `data.tool` is `pcap` (a `pcap-analyze` record), and `analysis` whose tool/action is `android`/`api-map`. HTTP records must also have the matching `data.source` (`live_probe` or `har_import`); inconsistent provenance is rejected rather than promoted to live evidence. It filters relevance **before** applying `--limit`, so newer checkpoints, task events, and other analysis records do not hide captures. One additional relevant record is fetched to detect a truncated window. A `pcapdroid` capture record is not itself input: it carries no hostnames, so select the `pcap-analyze` record that cites it.
 
 `--limit` defaults to 100 and accepts 1 through 1000. `--max-endpoints` defaults to 200 and accepts 1 through 5000. Explicit selection preserves the order of first occurrence of each ID. Endpoint/output caps still apply to explicit selection.
 
@@ -28,13 +28,17 @@ Observation categories have different meanings:
 
 | Category | Source | Meaning |
 | --- | --- | --- |
-| `static_candidate` | Stored index candidates or stored search-match candidates | A string occurred at a cited source location. It is not evidence of a reachable endpoint. |
+| `static_candidate` | Stored index candidates, stored search-match candidates, or cited `api-map` URL candidates | A string occurred at a cited source location. It is not evidence of a reachable endpoint. An `api-map` candidate additionally carries `static_candidate_sha256`, which is the join key to a `static_host_match`. |
 | `captured_http` | Imported HAR exchange | A request/response was present in supplied capture data. FORGE did not replay or independently verify it. |
 | `live_http` | Recorded live probe | FORGE attempted the request. `proven_live` is true only when a real recorded HTTP response status in 100 through 599 is present. |
+| `captured_network` | `pcap-analyze` host metadata from captured packets | A hostname was decoded from DNS, a TLS ClientHello SNI, or a plaintext HTTP `Host` in the capture. Nothing was decrypted and no request is proven, so `proven_live` stays false. |
+| `static_host_match` | `pcap-analyze` correlation with a cited `api-map` | An observed hostname is exactly equal to a static candidate's host. The candidate's path, method, body and authentication are still unproven, and the citation carries the map evidence ID. |
+
+Host identities from packets have only the `host` field: no scheme, path, method, headers or body was observed, so they never merge with a URL identity. `static_candidate_sha256` links a `static_host_match` observation to the `static_candidate` observation carrying the same hash. The `captured_network` observation reports `observation_kinds` counts, `observation_count`, first/last timestamp and `decryption_performed`; per-observation UIDs, package hints, IP addresses and ports stay in the cited `pcap-analyze` record and are not copied into the map.
 
 A failed live transport still appears as an attempted `live_http` request with `response_observed: false`, a null `response_status`, and its redacted error. It does not prove a reachable endpoint. A live 401, 403, or 500 response does prove an HTTP response was observed, not successful authentication. Even a live 200 response is not authentication verification. `proven_auth_path` and top-level `authentication_verified` remain false. Use the separate control-verification workflow for authentication claims.
 
-Every observation has citations containing `evidence_id`. Static citations preserve available location metadata: `source`, `member`, `line`, `column`, `offset`, `byte_offset`, `offset_space`, `compression`, `encoding`, `index_source`, and `kind`. The map never opens those locations. Binary offsets and text lines remain in their original coordinate space. HTTP observations cite their exchange/probe record directly.
+Every observation has citations containing `evidence_id`. Static citations preserve available location metadata: `source`, `member`, `line`, `column`, `offset`, `byte_offset`, `offset_space`, `compression`, `encoding`, `index_source`, `kind`, `class_name`, `sha256` and `size`. The map never opens those locations. Binary offsets and text lines remain in their original coordinate space. HTTP observations cite their exchange/probe record directly; packet observations cite the `pcap-analyze` record with the capture hash and size, and a `static_host_match` also cites the `api-map` record it matched against.
 
 Identical observations group together and collect unique citations. Repeated identical citations are omitted. Different response statuses, request/response field sets, selector metadata, categories, errors, and source locations remain distinct. Endpoint-level `proven_live` means at least one retained observation includes a live response, not that every citation is live evidence.
 
@@ -68,6 +72,7 @@ Additional fixed limits, also returned in `limits`:
 - 256 names per header/query/form list, 256 JSON field paths per body, and 256 extraction-selector entries.
 - 1,048,576 characters per body string considered for parsing; 2,048 traversal nodes; depth 16. Encoded byte size may differ from the character limit.
 - 100 distinct observations per endpoint, 20,000 retained observations in total, and 100 unique citations per observation.
-- 1,000 matches per search record, 20 stored candidates per search match, and 100 stored candidates per static index.
+- 1,000 matches per search record, 20 stored candidates per search match, and 100 stored candidates per static index or `api-map` record.
+- 200 hosts per `pcap-analyze` record, 200 `static_host_match` entries per record, and 8 distinct observation kinds per host.
 
-Omission flags describe this view, not a completeness guarantee for the underlying application. Existing redaction, importer limits, upstream sampling, and unavailable bodies can remove information before the map is built. No host resolution, endpoint probing, authentication inference, or raw-file fallback takes place.
+Omission flags describe this view, not a completeness guarantee for the underlying application. Existing redaction, importer limits, upstream sampling, and unavailable bodies can remove information before the map is built. No host resolution, endpoint probing, authentication inference, or raw-file fallback takes place. Host names, UIDs, package hints and addresses are never copied from a capture; the map keeps counts and citations, and the `pcap-analyze` record remains the place to read them. Exporting a snapshot through `bundle` withholds hostnames as well.

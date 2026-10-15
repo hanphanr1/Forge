@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.0 - 2026-10-15
+
+- `protocol-map` now consumes `pcap-analyze` packet analyses and `api-map` analyses, which 0.11 and 0.13 added without wiring them into the summary. Packet hosts appear as `captured_network` observations under a host-only identity that never merges with a URL, and a `static_host_match` links an observed hostname to a cited static candidate by `static_candidate_sha256`.
+- New observation categories `captured_network` and `static_host_match` keep packet provenance separate: nothing decoded from a capture is promoted to `live_http`, and host identities carry no method, path or body. Host names, UIDs, package hints and addresses are not copied into the map; counts and citations are, and the cited `pcap-analyze` record stays the place to read them.
+- `protocol-snapshot` and `protocol-diff` handle host-only identities, so packet hosts can be compared across sessions. A `pcapdroid` capture record is refused as protocol-map input with a message naming the cited `pcap-analyze` record, which carries the hosts.
+- Static citations now also preserve `class_name`, `sha256` and `size`, so an `api-map` candidate keeps its decompiled class/line location and its capture hash is visible on packet observations.
+- Fixed two defects in the new packet path: citation objects were re-normalized as iterables, which turned each citation into a list of its own keys, and dropping distinct observation kinds past the per-host cap did not report truncation.
+- Agent guidance now requires asking the operator in the same turn when a device step is next, and states that absent/unauthorized/offline/locked/empty-service observations are a request for operator help rather than a stopping condition: report the observed status, give one to three concrete fixes, keep the finished work, and retry. Substituting an emulator or silently dropping the runtime step is explicitly excluded.
+
 ## 0.13.0 - 2026-10-15
 
 - New `pcapdroid-preflight` and `pcapdroid-capture` drive the installed PCAPdroid app through its documented ADB Intent API. A session is `success` only when the generated dump name was observed, the scoped `CaptureService` was seen running, the stop was observed to take it down, and a new PCAP was retrieved and hashed. An accepted `am start` alone is a dispatch observation, not capture success.

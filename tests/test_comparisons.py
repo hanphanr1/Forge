@@ -74,6 +74,24 @@ class ComparisonTests(unittest.TestCase):
     def snapshot(self, record, *options):
         return self.command("protocol-snapshot", "--evidence", record["id"], *options)
 
+    def test_packet_hosts_survive_snapshot_and_diff_as_host_identities(self):
+        capture = self.store.add("runtime", {"tool": "pcapdroid", "action": "capture", "success": True,
+                                            "capture": {"path": "captures/run.pcap", "sha256": "b" * 64,
+                                                        "size": 24516}})
+        def packet_record(*hosts):
+            return self.store.add("analysis", {
+                "tool": "pcap", "action": "pcap-analyze", "capture": capture["data"]["capture"],
+                "hosts": [{"hostname": name, "observations": [{"kind": "tls_sni", "timestamp": 1.5}]}
+                          for name in hosts]})
+        before = self.snapshot(packet_record("grok.com"))
+        after = self.snapshot(packet_record("grok.com", "accounts.x.ai"))
+        result = self.command("protocol-diff", "--before", before["id"], "--after", after["id"])["data"]
+        self.assertIn("host-only identities", result["identity_policy"])
+        self.assertEqual([item["identity"] for item in result["added"]], [{"host": "accounts.x.ai"}])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(result["changed"], [])
+        self.assertTrue(result["complete"])
+
     def test_actual_har_and_live_snapshot_dimensions_provenance_and_citations(self):
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):

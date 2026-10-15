@@ -174,6 +174,109 @@ class ProtocolMapTests(unittest.TestCase):
         all_records = self.command("protocol-map")
         self.assertEqual(len(all_records["endpoints"]), 4)
 
+    def test_packet_hosts_are_their_own_cited_network_category(self):
+        match_map = self.store.add("analysis", {"tool": "android", "action": "api-map", "success": True,
+                                               "api_candidates": [{"url": "https://grok.com/x",
+                                                                   "url_sha256": "a" * 64}]})
+        capture = self.store.add("runtime", {"tool": "pcapdroid", "action": "capture", "success": True,
+                                            "capture": {"path": "captures/run.pcap", "sha256": "b" * 64,
+                                                        "size": 24516}})
+        record = self.store.add("analysis", {
+            "schema": "forge.pcap/v1", "tool": "pcap", "action": "pcap-analyze", "success": True,
+            "category": "captured_network", "evidence_ids": [capture["id"], match_map["id"]],
+            "capture": {"path": "captures/run.pcap", "sha256": "b" * 64, "size": 24516},
+            "packets_scanned": 76, "truncated": False, "decryption_performed": False,
+            "hosts": [{"hostname": "grok.com",
+                       "observations": [{"kind": "dns_query", "timestamp": 100.5, "uid": 10553},
+                                        {"kind": "tls_sni", "timestamp": 100.75, "uid": 10553}]},
+                      {"hostname": "other.example",
+                       "observations": [{"kind": "http_host", "timestamp": 101.25, "uid": None}]}],
+            "static_host_matches": [{"hostname": "grok.com", "static_candidate_sha256": "a" * 64,
+                                     "category": "static_host_match", "evidence_ids": [match_map["id"]]}],
+            "static_host_match_note": "An observed hostname equals a static candidate host; nothing else is proven."})
+        result = self.command("protocol-map", "--evidence", record["id"])
+        self.assertEqual(set(result["evidence_ids"]), {record["id"]})
+        self.assertFalse(result["input_truncated"])
+        hosts = {endpoint["host"]: endpoint for endpoint in result["endpoints"]}
+        self.assertEqual(set(hosts), {"grok.com", "other.example"})
+        for endpoint in hosts.values():
+            self.assertNotIn("url", endpoint)
+            self.assertNotIn("method", endpoint)
+            self.assertFalse(endpoint["proven_live"])
+            self.assertFalse(endpoint["proven_auth_path"])
+        grok = hosts["grok.com"]
+        network = next(item for item in grok["observations"] if item["category"] == "captured_network")
+        self.assertEqual(network["observation_kinds"], {"dns_query": 1, "tls_sni": 1})
+        self.assertEqual(network["observation_count"], 2)
+        self.assertEqual((network["first_timestamp"], network["last_timestamp"]), (100.5, 100.75))
+        self.assertFalse(network["decryption_performed"])
+        self.assertIn("not a successful call", network["note"])
+        network_citation = network["citations"][0]
+        self.assertEqual(network_citation["evidence_id"], record["id"])
+        self.assertEqual((network_citation["location"]["sha256"], network_citation["location"]["size"]),
+                         ("b" * 64, 24516))
+        self.assertNotIn("captures/run.pcap", json.dumps(result))
+        matched = next(item for item in grok["observations"] if item["category"] == "static_host_match")
+        self.assertEqual(matched["static_candidate_sha256"], "a" * 64)
+        self.assertEqual({citation["evidence_id"] for citation in matched["citations"]},
+                         {record["id"], match_map["id"]})
+        for endpoint in result["endpoints"]:
+            for item in endpoint["observations"]:
+                self.assertNotIn("request_body", item)
+                self.assertNotIn("response_body", item)
+
+    def test_packet_record_shape_caps_and_rejection_are_explicit(self):
+        malformed = self.store.add("analysis", {"tool": "pcap", "action": "pcap-analyze", "hosts": "not-a-list"})
+        with self.assertRaisesRegex(ForgeError, "invalid packet metadata"):
+            self.command("protocol-map", "--evidence", malformed["id"])
+        capture = self.store.add("runtime", {"tool": "pcapdroid", "action": "capture", "success": True,
+                                            "capture": {"path": "captures/run.pcap", "sha256": "b" * 64,
+                                                        "size": 10}})
+        wide = self.store.add("analysis", {
+            "tool": "pcap", "action": "pcap-analyze", "capture": capture["data"]["capture"],
+            "hosts": [{"hostname": f"host{index}.example", "observations": [{"kind": "dns_query"}]}
+                      for index in range(forge_protocol.MAX_NETWORK_HOSTS + 5)],
+            "static_host_matches": [{"hostname": "host0.example", "static_candidate_sha256": "c" * 64}
+                                    for _ in range(forge_protocol.MAX_NETWORK_MATCHES + 5)]})
+        result = self.command("protocol-map", "--evidence", wide["id"], "--max-endpoints", "5000")
+        self.assertEqual(len([e for e in result["endpoints"] if "host" in e]), forge_protocol.MAX_NETWORK_HOSTS)
+        self.assertTrue(result["input_truncated"])
+        kinds = {item["category"] for endpoint in result["endpoints"] for item in endpoint["observations"]}
+        self.assertEqual(kinds, {"captured_network", "static_host_match"})
+        many_kinds = self.store.add("analysis", {
+            "tool": "pcap", "action": "pcap-analyze",
+            "hosts": [{"hostname": "wide.example",
+                       "observations": [{"kind": f"kind{index}"} for index in range(40)]}]})
+        result = self.command("protocol-map", "--evidence", many_kinds["id"])
+        kinds = result["endpoints"][0]["observations"][0]["observation_kinds"]
+        self.assertEqual(len(kinds), forge_protocol.MAX_NETWORK_KINDS)
+        self.assertTrue(result["input_truncated"])
+
+    def test_api_map_candidates_and_capture_hint_are_mapped(self):
+        mapping = self.store.add("analysis", {
+            "schema": "forge.android-api-map/v1", "tool": "android", "action": "api-map", "success": True,
+            "api_candidates": [
+                {"url": "https://grok.com/ws/mgw/", "url_sha256": "d" * 64, "category": "static_candidate",
+                 "source_occurrences": [{"path": ".forge/analysis/jadx/e5/c.java", "class_name": "e5.c",
+                                         "line": 20, "source_sha256": "e" * 64}]},
+                {"url_sha256": "f" * 64}]})
+        result = self.command("protocol-map", "--evidence", mapping["id"])
+        endpoint = result["endpoints"][0]
+        self.assertEqual(endpoint["url"], "https://grok.com/ws/mgw/")
+        self.assertNotIn("method", endpoint)
+        self.assertFalse(endpoint["proven_live"])
+        observation = endpoint["observations"][0]
+        self.assertEqual(observation["category"], "static_candidate")
+        self.assertEqual(observation["static_candidate_sha256"], "d" * 64)
+        location = observation["citations"][0]["location"]
+        self.assertEqual((location["class_name"], location["line"]), ("e5.c", 20))
+        self.assertNotIn(".forge/analysis", json.dumps(result))
+        capture = self.store.add("runtime", {"tool": "pcapdroid", "action": "capture", "success": True,
+                                            "capture": {"path": "captures/run.pcap", "sha256": "b" * 64,
+                                                        "size": 24}})
+        with self.assertRaisesRegex(ForgeError, "pass its cited pcap-analyze record"):
+            self.command("protocol-map", "--evidence", capture["id"])
+
     def test_relevant_window_explicit_precedence_bounds_and_empty(self):
         empty = self.command("protocol-map")
         self.assertTrue(empty["empty"])

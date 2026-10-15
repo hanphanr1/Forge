@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import parse_qsl, urlsplit
 
 from forge_core import ForgeError, redact_url, scrub_text
 
 
 KINDS = ("http_probe", "har_exchange", "analysis", "search")
+STATIC_TOOL = "static_index"
+NETWORK_TOOL = "pcap"
+MAP_TOOL = "android"
+MAP_ACTION = "api-map"
+INPUT_NOTE = ("protocol-map input is live/imported HTTP evidence, a search record, a static index, an "
+              "android api-map analysis, or a pcap-analyze analysis; a pcapdroid capture record carries no "
+              "hosts of its own, so pass its cited pcap-analyze record instead")
 MAX_FIELDS = 256
 MAX_NODES = 2048
 MAX_DEPTH = 16
@@ -15,11 +23,26 @@ MAX_BODY_BYTES = 1024 * 1024
 MAX_OBSERVATIONS = 100
 MAX_CITATIONS = 100
 MAX_TOTAL_OBSERVATIONS = 20000
+MAX_NETWORK_HOSTS = 200
+MAX_NETWORK_MATCHES = 200
+MAX_NETWORK_KINDS = 8
 
 
 def _relevant(record):
-    return record["kind"] in KINDS and (record["kind"] != "analysis" or
-            isinstance(record.get("data"), dict) and record["data"].get("tool") == "static_index")
+    if record["kind"] == "analysis":
+        data = record.get("data")
+        if not isinstance(data, dict):
+            return False
+        if data.get("tool") == NETWORK_TOOL:
+            return True
+        return data.get("tool") == STATIC_TOOL or (data.get("tool") == MAP_TOOL and
+                                                   data.get("action") == MAP_ACTION)
+    return record["kind"] in KINDS
+
+
+def _is_map(record):
+    data = record["data"]
+    return data.get("tool") == MAP_TOOL and data.get("action") == MAP_ACTION
 
 
 def _records(args, store):
@@ -32,16 +55,18 @@ def _records(args, store):
         for evidence_id in dict.fromkeys(args.evidence):
             record = store.get(evidence_id)
             if not _relevant(record):
-                raise ForgeError(f"Evidence {evidence_id} is not protocol-map input ({record['kind']})")
+                raise ForgeError(f"Evidence {evidence_id} is not protocol-map input ({record['kind']}); {INPUT_NOTE}")
             if not isinstance(record.get("data"), dict):
                 raise ForgeError(f"Evidence {evidence_id} has invalid protocol metadata")
             records.append(record)
         return records, False
     rows = store.connection.execute(
         "SELECT id, kind, created_at, data FROM evidence WHERE kind IN (?, ?, ?) "
-        "OR (kind='analysis' AND json_extract(data, '$.tool')='static_index') "
+        "OR (kind='analysis' AND (json_extract(data, '$.tool') IN (?, ?) "
+        "OR (json_extract(data, '$.tool') = ? AND json_extract(data, '$.action') = ?))) "
         "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-        ("http_probe", "har_exchange", "search", args.limit + 1)).fetchall()
+        ("http_probe", "har_exchange", "search", STATIC_TOOL, NETWORK_TOOL, MAP_TOOL, MAP_ACTION,
+         args.limit + 1)).fetchall()
     records = [{"id": row[0], "kind": row[1], "created_at": row[2], "data": json.loads(row[3])}
                for row in rows[:args.limit]]
     for record in records:
@@ -130,7 +155,7 @@ def _citation(record, location=None):
     if isinstance(location, dict):
         # Never copy text, body, extracted values, or filesystem paths to open.
         keys = ("source", "member", "line", "column", "offset", "byte_offset", "offset_space",
-                "compression", "encoding", "index_source", "kind")
+                "compression", "encoding", "index_source", "kind", "sha256", "size", "class_name")
         citation["location"] = {key: scrub_text(value) if isinstance(value, str) else value
                                 for key, value in location.items() if key in keys and
                                 isinstance(value, (str, int, float, bool))}
@@ -182,6 +207,72 @@ def _http(record):
     return {"url": url, "method": scrub_text(request["method"])}, observation, _citation(record)
 
 
+def _network(record):
+    """Host identities observed in one cited packet analysis, with no path or body claim."""
+    data = record["data"]
+    hosts = data.get("hosts")
+    capture = data.get("capture")
+    if not isinstance(hosts, list):
+        raise ForgeError(f"Evidence {record['id']} has invalid packet metadata")
+    capture_sha = capture.get("sha256") if isinstance(capture, dict) else None
+    capture_size = capture.get("size") if isinstance(capture, dict) else None
+    location = {"kind": "packet_host"}
+    if isinstance(capture_sha, str):
+        location["sha256"] = capture_sha
+    if type(capture_size) is int:
+        location["size"] = capture_size
+    emitted, hosts_omitted = [], len(hosts) > MAX_NETWORK_HOSTS
+    kinds_omitted = False
+    for entry in hosts[:MAX_NETWORK_HOSTS]:
+        if not isinstance(entry, dict) or not isinstance(entry.get("hostname"), str):
+            continue
+        observations = entry.get("observations")
+        if not isinstance(observations, list):
+            continue
+        kinds = {}
+        kinds_omitted = False
+        timestamps = []
+        for item in observations:
+            if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
+                continue
+            if item["kind"] not in kinds and len(kinds) >= MAX_NETWORK_KINDS:
+                kinds_omitted = True
+                continue
+            kinds[item["kind"]] = kinds.get(item["kind"], 0) + 1
+            timestamp = item.get("timestamp")
+            if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                timestamps.append(round(float(timestamp), 6))
+        observation = {"category": "captured_network", "proven_live": False, "proven_auth_path": False,
+                       "observation_kinds": {name: kinds[name] for name in sorted(kinds)},
+                       "observation_count": len(observations),
+                       "first_timestamp": min(timestamps) if timestamps else None,
+                       "last_timestamp": max(timestamps) if timestamps else None,
+                       "decryption_performed": bool(data.get("decryption_performed")),
+                       "note": "Hostname came from packet metadata (DNS/TLS SNI/plaintext Host); it is not a "
+                               "successful call and no request path, method, body or authentication is proven."}
+        emitted.append(({"host": scrub_text(entry["hostname"])}, observation, _citation(record, location)))
+    matches = data.get("static_host_matches")
+    match_note = data.get("static_host_match_note")
+    match_omitted = isinstance(matches, list) and len(matches) > MAX_NETWORK_MATCHES
+    for entry in (matches[:MAX_NETWORK_MATCHES] if isinstance(matches, list) else []):
+        if not isinstance(entry, dict) or not isinstance(entry.get("hostname"), str):
+            continue
+        sha = entry.get("static_candidate_sha256")
+        if not isinstance(sha, str):
+            continue
+        observation = {"category": "static_host_match", "proven_live": False, "proven_auth_path": False,
+                       "static_candidate_sha256": sha,
+                       "note": scrub_text(match_note) if isinstance(match_note, str) else
+                               "An observed hostname equals a static candidate host; the path, method and body "
+                               "from that candidate are not proven."}
+        citations = [_citation(record, {"kind": "static_host_match"})]
+        for evidence_id in (entry.get("evidence_ids") or [])[:MAX_FIELDS]:
+            if isinstance(evidence_id, str) and evidence_id.startswith("ev_"):
+                citations.append({"evidence_id": evidence_id, "location": {"kind": "static_candidate"}})
+        emitted.append(({"host": scrub_text(entry["hostname"])}, observation, citations))
+    return emitted, hosts_omitted or match_omitted or kinds_omitted
+
+
 def protocol_map(args, store):
     records, window_truncated = _records(args, store)
     endpoints = {}
@@ -191,8 +282,9 @@ def protocol_map(args, store):
     sampled = []
     total = 0
 
-    def add(identity, observation, citation):
+    def add(identity, observation, citations):
         nonlocal total
+        citations = [citations] if isinstance(citations, dict) else list(citations)
         key = json.dumps(identity, sort_keys=True)
         if key not in endpoints:
             if len(endpoints) >= args.max_endpoints:
@@ -204,7 +296,9 @@ def protocol_map(args, store):
         signature = json.dumps(observation, sort_keys=True)
         for existing in endpoint["observations"]:
             if json.dumps({k: v for k, v in existing.items() if k != "citations"}, sort_keys=True) == signature:
-                if citation not in existing["citations"]:
+                for citation in citations:
+                    if citation in existing["citations"]:
+                        continue
                     if len(existing["citations"]) >= MAX_CITATIONS:
                         flags["citations_omitted"] = True
                     else:
@@ -213,7 +307,7 @@ def protocol_map(args, store):
         if len(endpoint["observations"]) >= MAX_OBSERVATIONS or total >= MAX_TOTAL_OBSERVATIONS:
             flags["observations_omitted"] = True
             return
-        endpoint["observations"].append({**observation, "citations": [citation]})
+        endpoint["observations"].append({**observation, "citations": list(citations)[:MAX_CITATIONS]})
         endpoint["proven_live"] |= observation["proven_live"]
         total += 1
 
@@ -226,6 +320,29 @@ def protocol_map(args, store):
             flags["fields_omitted"] |= observation["metadata_omitted"] or any(
                 observation[side]["fields_omitted"] for side in ("request_body", "response_body"))
             add(identity, observation, citation)
+            continue
+        if record["kind"] == "analysis" and data.get("tool") == NETWORK_TOOL:
+            observed, truncated = _network(record)
+            flags["input_truncated"] |= truncated
+            for identity, observation, citations in observed:
+                add(identity, observation, citations)
+            continue
+        if record["kind"] == "analysis" and _is_map(record):
+            candidates = data.get("api_candidates")
+            if not isinstance(candidates, list):
+                raise ForgeError(f"Evidence {record['id']} has invalid api-map candidates")
+            flags["input_truncated"] |= len(candidates) > 100
+            for candidate in candidates[:100]:
+                if not isinstance(candidate, dict) or not isinstance(candidate.get("url"), str):
+                    continue
+                location = candidate.get("source_occurrences")
+                location = location[0] if isinstance(location, list) and location and \
+                    isinstance(location[0], dict) else None
+                sha = candidate.get("url_sha256")
+                observation = {"category": "static_candidate", "proven_live": False, "proven_auth_path": False}
+                if isinstance(sha, str) and re.fullmatch(r"[a-f0-9]{64}", sha):
+                    observation["static_candidate_sha256"] = sha
+                add({"url": redact_url(candidate["url"])}, observation, _citation(record, location))
             continue
         if record["kind"] == "analysis":
             candidates = data.get("endpoint_candidates", [])
@@ -258,12 +375,16 @@ def protocol_map(args, store):
                        "body_nodes": MAX_NODES, "body_depth": MAX_DEPTH,
                        "observations_per_endpoint": MAX_OBSERVATIONS, "total_observations": MAX_TOTAL_OBSERVATIONS,
                        "citations_per_observation": MAX_CITATIONS, "search_matches_per_record": 1000,
-                       "search_candidates_per_match": 20},
+                       "search_candidates_per_match": 20, "hosts_per_packet_record": MAX_NETWORK_HOSTS,
+                       "static_host_matches_per_record": MAX_NETWORK_MATCHES,
+                       "observation_kinds_per_host": MAX_NETWORK_KINDS},
             "authentication_verified": False}
 
 
 def register(subparsers):
-    parser = subparsers.add_parser("protocol-map", help="Map stored HTTP observations and cited static candidates without I/O")
+    parser = subparsers.add_parser("protocol-map",
+                                   help="Map stored HTTP observations, packet-level hosts and cited static "
+                                        "candidates without I/O")
     parser.add_argument("--evidence", action="append", default=[], metavar="ID",
                         help="Select explicit evidence IDs; repeatable, takes precedence over --limit")
     parser.add_argument("--limit", type=int, default=100, help="Newest relevant records (1..1000)")

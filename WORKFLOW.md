@@ -77,7 +77,11 @@ Record a hook boundary as one `hook-evidence` triple: the static location, the r
 
 There is no iOS adapter in this collection. `ios-devices` and `ios-pair` only report what a configured `idevice_id`/`idevicepair` observed, so attachment and pairing are known before anyone changes device settings. Identify the compatible capture/debug environment and its pairing/signing prerequisites before requesting an iPhone connection. ADB does not support iOS, a jailed device cannot be instrumented, and a trusted capture certificate does not automatically defeat application layer pinning.
 
-Keep private apps/data out of scope. If hardware is missing, checkpoint the exact blocker and next experiment, continue independent work, and wait only at the device-dependent step. Do not manufacture successful runtime evidence.
+Keep private apps/data out of scope. Do not manufacture successful runtime evidence.
+
+When a device or mobile app step is the next experiment, **ask the operator in that same turn**: name the device, the app/package, the action, the setting to enable and what will be captured or hooked. Then continue the work that does not need hardware.
+
+An absent, unauthorized, offline, `multiple`, locked-screen or empty-service observation is a **request for operator help, not a stopping condition**. State the exact observed status plus one to three concrete things the operator should do (data-capable cable, enable USB debugging, accept the RSA prompt, unlock the screen, launch the app), keep the finished parts intact, and retry after they confirm. Never end a task with "no device attached so I stopped", silently skip the runtime step, or treat one empty `adb devices` as the conclusion. Do not substitute an emulator, install a system image, root, unlock a bootloader, jailbreak, factory-reset, or install a trust profile instead of asking.
 
 ## 4. Probe the observed protocol
 

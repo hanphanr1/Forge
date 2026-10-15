@@ -106,6 +106,10 @@ forge pcap-analyze captures/run.pcap --capture-evidence "<capture-id>" --map-evi
 `pcapdroid-capture` prints a ready line once the scoped `CaptureService` is running and the generated dump
 file exists (it may still be 0 bytes), then waits out the bounded window while the operator performs one named
 action. The app may ask for consent on start and stop; a prompt left open is reported as a blocker, not retried.
+If a device step is blocked, tell the operator the exact observed status and the one to three things to do
+(data-capable cable, USB debugging, accept the RSA prompt, unlock the screen, launch the app, approve the
+PCAPdroid prompt) and retry after they confirm; a locked screen or an empty device listing is a request for
+help, not a reason to drop the runtime step or to substitute an emulator.
 Root capture, TLS decryption, SOCKS5, PCAPNG, private-DNS blocking and remote exporters are all sent as off.
 `success` requires an observed service, the generated dump name, an observed stop and a hash-verified retrieval.
 

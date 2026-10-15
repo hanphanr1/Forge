@@ -159,7 +159,7 @@ HAR conversion writes editable request templates and source/output hashes withou
 
 `run-target` executes trusted project code for two explicit controls with bounded stdout/stderr, process deadlines, source hashes and actual executable fingerprints. Optional `stdin_json` keeps credentials out of argv; optional declared `version_argv` records a bounded version probe. All standard buckets remain visible, but only expected HIT/FREE and FAIL controls can pass. `verify-target` rechecks sources and executable bytes. The program reports its bucket; FORGE does not independently attest authentication or IP. See [target controls](docs/target-runs.md).
 
-`protocol-map` summarizes stored URLs, methods, header/field names and source citations. Static candidates, imported captures and live HTTP observations stay separate; it neither opens raw captures nor probes endpoints. See [protocol map](docs/protocol-map.md).
+`protocol-map` summarizes stored URLs, methods, header/field names, packet-level hosts and source citations. Static candidates, imported captures, live HTTP observations, packet hosts and host-to-candidate matches stay separate; it neither opens raw captures nor probes endpoints. See [protocol map](docs/protocol-map.md).
 
 ## Compare versions and hand off evidence
 

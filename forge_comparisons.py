@@ -48,6 +48,12 @@ def _snapshot(store, evidence_id):
 
 
 def _endpoint_identity(endpoint):
+    if "host" in endpoint:
+        host = endpoint.get("host")
+        if not isinstance(host, str) or not host:
+            raise ForgeError("Snapshot endpoint has no usable host identity")
+        # A packet-level host is its own identity: no scheme, path, method or body was observed.
+        return {"host": host}
     url = endpoint.get("url")
     if not isinstance(url, str):
         raise ForgeError("Snapshot endpoint has no URL")
@@ -71,7 +77,8 @@ def _protocol_view(record):
         identity = _endpoint_identity(endpoint)
         key = _canonical(identity)
         entry = entries.setdefault(key, {"identity": identity, "observations": [], "urls": set()})
-        entry["urls"].add(endpoint["url"])
+        if isinstance(endpoint.get("url"), str):
+            entry["urls"].add(endpoint["url"])
         observations = endpoint.get("observations")
         if not isinstance(observations, list) or any(not isinstance(item, dict) for item in observations):
             raise ForgeError("Snapshot endpoint has invalid observations")
@@ -137,7 +144,8 @@ def protocol_diff(args, store):
                    for item in scope.get("static_candidate_sampling", []))
     return store.add("protocol_diff", {
         "schema_version": SCHEMA_VERSION, "before_id": before["id"], "after_id": after["id"],
-        "identity_policy": "URL scheme/authority/path and observed method; query/fragment excluded; static method unknown",
+        "identity_policy": "URL scheme/authority/path and observed method; query/fragment excluded; static method "
+                           "unknown; packet-level hosts are host-only identities with no method, path or body",
         "added": [right[key] for key in sorted(right.keys() - left.keys())],
         "removed": [left[key] for key in sorted(left.keys() - right.keys())], "changed": changed,
         "before_scope": left_scope, "after_scope": right_scope,
