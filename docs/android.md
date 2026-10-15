@@ -42,16 +42,17 @@ returned by `pm path`, copies the base and splits to a new project directory, ha
 records package/version/split metadata. The pull is read-only. A hash identifies the bytes copied
 from the device; it does not authenticate the publisher.
 
-To find API strings without scanning archive metadata first, run `artifact-index` on the pulled base
-APK with `--dex`, then `search` the returned index. The index keeps each match's DEX member and
-byte offset. Strings remain static candidates; follow the cited class in JADX before calling a
-route an API flow.
+To find API strings without indexing archive resources first, run `artifact-index` on the pulled
+base APK with `--dex`, then `search` the returned index. The index keeps each DEX member and byte
+offset. When JADX output exists, `android-api-map` links those candidates to exact source literal
+occurrences and class/line locations. It does not prove a caller dispatches the request.
 
 ```console
 mkdir installed
 forge adb pull-package --serial OWNED_DEVICE_SERIAL --package com.example.app --path installed/example
 forge artifact-index installed/example/base.apk --dex --max-records 500000 --max-index-bytes 268435456
 forge search "/api/" "<returned-index-path>" --max-records 500000
+forge android-api-map --index-evidence "<dex-index-id>" --jadx-evidence "<jadx-evidence-id>" --class-filter "<observed-class>"
 forge adb launch --serial OWNED_DEVICE_SERIAL --package com.example.app --component com.example.app/.MainActivity
 forge adb observe --serial OWNED_DEVICE_SERIAL --package com.example.app --seconds 90 --lines 3000 --ui-snapshots
 ```

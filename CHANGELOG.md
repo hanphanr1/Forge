@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0 - 2026-10-15
+
+- New `android-api-map` joins a cited DEX static index with cited successful/partial JADX output. It verifies the index SHA-256, scans bounded Java/Kotlin/smali sources, and maps each URL string to exact class/line/source-hash occurrences. `--class-filter` narrows the scan when the class is already known.
+- The report links both input evidence records and labels results `static_candidate`. A literal in a decompiled class is **not** proof a caller dispatches it, the app sent it, or the server accepted it. Source paths and code excerpts are not exported in bundles.
+- Exercised on the installed Grok 1.2.45 build: 195 candidate URLs from the DEX index; filtering to `e5.c` scanned one Java file and mapped 13 URL literals to line 20. No live API call was claimed; no HAR capture was available.
+- Tests cover evidence-kind validation, index hash mismatch, bounded class filtering, source line/hash citations and bundle projection.
+
 ## 0.10.0 - 2026-10-15
 
 - `artifact-index --dex` indexes only root `classes*.dex` members of an APK/ZIP. Resource and license entries no longer consume the record budget before DEX strings, and matches retain the exact archive member and byte-offset citation.

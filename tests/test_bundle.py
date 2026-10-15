@@ -70,7 +70,15 @@ class BundleTests(unittest.TestCase):
             "ui_snapshots": {"before": {"xml": "private screen content"}}})
         indexed = self.store.add("analysis", {"tool": "static_index", "member_filter": "dex",
                                               "records": 1, "truncated": False})
-        self.export([pulled["id"], observed["id"], indexed["id"]])
+        mapped = self.store.add("analysis", {
+            "tool": "android", "action": "api-map", "candidate_count": 1, "evidence_ids": [],
+            "api_candidates": [{"url": "https://api.example.test/login?token=private-url-token",
+                                "category": "static_candidate",
+                                "dex_locations": [{"dex_member": "classes.dex", "byte_offset": 19}],
+                                "source_occurrences": [{"path": ".forge/analysis/jadx/private/e5/c.java",
+                                                        "class_name": "e5.c", "line": 20,
+                                                        "source_sha256": "b" * 64}]}]})
+        self.export([pulled["id"], observed["id"], indexed["id"], mapped["id"]])
         members = self.read_members()
         packed = b"\n".join(members.values()).decode()
         self.assertIn("pull-package", packed)
@@ -79,6 +87,11 @@ class BundleTests(unittest.TestCase):
         self.assertIn("version_name", packed)
         self.assertIn("a" * 64, packed)
         self.assertIn('"member_filter": "dex"', packed)
+        self.assertIn("api-map", packed)
+        self.assertIn("e5.c", packed)
+        self.assertIn("classes.dex", packed)
+        self.assertNotIn("private-url-token", packed)
+        self.assertNotIn("jadx/private/e5/c.java", packed)
         self.assertNotIn("pulled/app/base.apk", packed)
         self.assertNotIn("private-session-token", packed)
         self.assertNotIn("private screen content", packed)

@@ -179,7 +179,7 @@ Protocol snapshots retain citations and omission flags; their diffs distinguish 
 | Area | Commands | Boundary |
 |---|---|---|
 | Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
-| Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search` | Bounded readers; `artifact-index --dex` selects root DEX members before APK resources; strings remain candidates, not live protocol proof |
+| Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search`, `android-api-map` | DEX-only APK indexing and cited source-literal mapping; strings remain static candidates, not live protocol proof |
 | Runtime | `jadx`, `native`, `adb`, `adb-preflight`, `adb-install-splits`, `adb pull-package`, `adb observe`, `apk-info`, `frida`, `doctor` | Actual installed tools; split selection and compatible authorized hardware are explicit; `observe` captures process logcat, not HTTP/TLS |
 | APK patching | `apk-decode`, `apk-manifest`, `apk-rebuild`, `apk-sign`, `apk-gadget` | Unsigned rebuilds stay unsigned; signing never publishes output that fails verification; a Gadget repackage is recorded as a debuggable build with a replaced signature |
 | iOS boundary | `ios-devices`, `ios-pair` | Read-only external tool observations; no capture, hooking or injection capability |

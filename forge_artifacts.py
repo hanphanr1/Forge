@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import signal
+import stat
 import struct
 import subprocess
 import tempfile
@@ -23,7 +24,7 @@ import uuid
 import zipfile
 import zlib
 
-from forge_core import ForgeError, redact, scrub_text, utc_now
+from forge_core import ForgeError, redact, redact_url, scrub_text, utc_now
 from forge_toolchain import find_tool, java_environment
 
 CHUNK = 64 * 1024
@@ -35,6 +36,7 @@ TEXT_SUFFIXES = {
     ".py", ".sh", ".sql", ".md", ".svg", ".map", ".graphql", ".proto",
 }
 ENDPOINT = re.compile(r"https?://[^\s\"'<>\\]+|/(?:api|auth|oauth|login|signin|session|v[0-9]+)(?:/[A-Za-z0-9._~!$&()*+,;=:@%/?#-]*)?", re.I)
+URL_LITERAL = re.compile(r"(?:https?|wss?)://[^\s\"'<>\\]+", re.I)
 
 
 def _positive(value):
@@ -590,6 +592,215 @@ def search(args, store):
     })
 
 
+def _redacted_api_url(value):
+    scheme, separator, rest = value.partition("://")
+    if not separator:
+        return scrub_text(value)
+    if scheme.lower() in {"ws", "wss"}:
+        safe = redact_url("https://" + rest)
+        return scheme + "://" + safe.split("://", 1)[-1]
+    return redact_url(value)
+
+
+def android_api_map(args, store):
+    for name, value, maximum in (
+            ("max-index-bytes", args.max_index_bytes, 1024 * 1024 * 1024),
+            ("max-candidates", args.max_candidates, 5000),
+            ("max-source-files", args.max_source_files, 500000),
+            ("max-source-bytes", args.max_source_bytes, 2 * 1024 * 1024 * 1024),
+            ("max-source-file-bytes", args.max_source_file_bytes, 128 * 1024 * 1024),
+            ("max-occurrences", args.max_occurrences, 100000)):
+        if type(value) is not int or not 1 <= value <= maximum:
+            raise ForgeError(f"--{name} must be an integer from 1 to {maximum}")
+    source_filters = []
+    for value in getattr(args, "class_filter", []):
+        normalized = value.strip().replace("/", ".")
+        if normalized.endswith(".java"):
+            normalized = normalized[:-5]
+        if not normalized or len(normalized) > 512:
+            raise ForgeError("--class-filter must be a non-empty class/path substring up to 512 characters")
+        source_filters.append(normalized.casefold())
+    index_record = store.get(args.index_evidence)
+    jadx_record = store.get(args.jadx_evidence)
+    if index_record["kind"] != "analysis" or index_record["data"].get("tool") != "static_index":
+        raise ForgeError("--index-evidence must cite a static_index analysis record")
+    if jadx_record["kind"] != "analysis" or jadx_record["data"].get("tool") != "jadx" or \
+            jadx_record["data"].get("status") not in {"success", "partial"}:
+        raise ForgeError("--jadx-evidence must cite a successful or partial JADX analysis record")
+    index_data, jadx_data = index_record["data"], jadx_record["data"]
+    index_path = _input(store, index_data.get("path", ""), local=True)
+    if not index_path.is_file() or index_path.name != "index.jsonl":
+        raise ForgeError("Static-index evidence does not point to one index.jsonl file")
+    index_size = index_path.stat().st_size
+    if index_size > args.max_index_bytes:
+        raise ForgeError(f"Static index exceeds --max-index-bytes ({args.max_index_bytes})")
+    index_digest = hashlib.sha256()
+    with index_path.open("rb") as stream:
+        for block in iter(lambda: stream.read(CHUNK), b""):
+            index_digest.update(block)
+    index_sha256 = index_digest.hexdigest()
+    if index_sha256 != index_data.get("index_sha256") or index_size != index_data.get("index_size"):
+        raise ForgeError("Static index bytes changed after their cited evidence was recorded")
+    output_root = _input(store, jadx_data.get("output_path", ""), local=True)
+    if not output_root.is_dir():
+        raise ForgeError("JADX evidence output directory is unavailable")
+    source_root = output_root / "sources" if (output_root / "sources").is_dir() else output_root
+    candidates, candidate_omitted, index_records = {}, 0, 0
+    pattern_bytes = 0
+    truncated = bool(index_data.get("truncated"))
+    try:
+        with index_path.open("rb") as stream:
+            for raw in stream:
+                if len(raw) > 128 * 1024:
+                    raise ForgeError("Static index record exceeds the 128 KiB reader cap")
+                if index_records >= 1_000_000:
+                    truncated = True
+                    break
+                try:
+                    record = json.loads(raw)
+                except (ValueError, UnicodeError) as error:
+                    raise ForgeError(f"Invalid static index JSON at record {index_records + 1}") from error
+                if not isinstance(record, dict) or not isinstance(record.get("text"), str):
+                    raise ForgeError(f"Invalid static index record {index_records + 1}")
+                index_records += 1
+                for found in URL_LITERAL.finditer(record["text"]):
+                    url = found.group().rstrip(".,;:)]}")
+                    if not url or len(url) > 2048:
+                        candidate_omitted += 1
+                        truncated = True
+                        continue
+                    key = url.casefold()
+                    location = {"dex_member": record["member"]} if isinstance(record.get("member"), str) else {}
+                    location.update({name: record[name] for name in ("byte_offset", "line", "column")
+                                     if name in record and isinstance(record[name], int)})
+                    if key in candidates:
+                        locations = candidates[key]["dex_locations"]
+                        if location and location not in locations and len(locations) < 5:
+                            locations.append(location)
+                        continue
+                    escaped_size = len(re.escape(url)) + 1
+                    if len(candidates) >= args.max_candidates or pattern_bytes + escaped_size > 256 * 1024:
+                        candidate_omitted += 1
+                        truncated = True
+                        continue
+                    pattern_bytes += escaped_size
+                    candidates[key] = {"raw_url": url, "dex_locations": [location] if location else []}
+    except OSError as error:
+        raise ForgeError(f"Cannot read cited static index: {error}") from error
+    url_pattern = None
+    if candidates:
+        values = sorted((item["raw_url"] for item in candidates.values()), key=len, reverse=True)
+        url_pattern = re.compile("|".join(re.escape(value) for value in values), re.I)
+    by_folded_url = {item["raw_url"].casefold(): key for key, item in candidates.items()}
+    matches = {key: [] for key in candidates}
+    source_files_scanned = source_bytes_scanned = source_files_omitted = source_bytes_omitted = 0
+    source_occurrences = source_occurrences_omitted = 0
+    source_truncated = False
+    stop = False
+    for directory, dirs, files in os.walk(source_root, followlinks=False):
+        kept_dirs = []
+        for name in sorted(dirs):
+            child = Path(directory) / name
+            attributes = getattr(child.lstat(), "st_file_attributes", 0) if child.exists() else 0
+            if child.is_symlink() or attributes & 0x400:
+                continue
+            kept_dirs.append(name)
+        dirs[:] = kept_dirs
+        for name in sorted(files):
+            source_file = Path(directory) / name
+            if source_file.suffix.lower() not in {".java", ".kt", ".smali"}:
+                continue
+            if source_file.is_symlink():
+                source_files_omitted += 1
+                continue
+            class_name = source_file.relative_to(source_root).with_suffix("").as_posix().replace("/", ".")
+            if source_filters and not any(term in class_name.casefold() for term in source_filters):
+                continue
+            if source_files_scanned >= args.max_source_files:
+                source_files_omitted += 1
+                source_truncated = True
+                stop = True
+                break
+            try:
+                size = source_file.stat().st_size
+            except OSError:
+                source_files_omitted += 1
+                continue
+            if size > args.max_source_file_bytes:
+                source_files_omitted += 1
+                source_bytes_omitted += size
+                source_truncated = True
+                continue
+            if source_bytes_scanned + size > args.max_source_bytes:
+                source_files_omitted += 1
+                source_bytes_omitted += size
+                source_truncated = True
+                stop = True
+                break
+            try:
+                content = source_file.read_bytes()
+            except OSError:
+                source_files_omitted += 1
+                continue
+            source_files_scanned += 1
+            source_bytes_scanned += len(content)
+            if url_pattern is None:
+                continue
+            lines = content.decode("utf-8", "replace").splitlines()
+            file_hits = {}
+            for line_number, line in enumerate(lines, 1):
+                for found in url_pattern.finditer(line):
+                    key = by_folded_url.get(found.group().casefold())
+                    if key is None:
+                        continue
+                    if source_occurrences >= args.max_occurrences:
+                        source_occurrences_omitted += 1
+                        source_truncated = True
+                        stop = True
+                        break
+                    file_hits.setdefault(key, set()).add(line_number)
+                    source_occurrences += 1
+                if stop:
+                    break
+            if file_hits:
+                file_sha256 = hashlib.sha256(content).hexdigest()
+                for key, line_numbers in file_hits.items():
+                    relative = _relative(store, source_file)
+                    class_name = source_file.relative_to(source_root).with_suffix("").as_posix().replace("/", ".")
+                    matches[key].extend({"path": relative, "class_name": class_name, "line": number,
+                                         "source_sha256": file_sha256}
+                                        for number in sorted(line_numbers))
+            if stop:
+                break
+        if stop:
+            break
+    api_candidates = []
+    for key, item in candidates.items():
+        raw_url = item["raw_url"]
+        api_candidates.append({"url": _redacted_api_url(raw_url),
+                               "url_sha256": hashlib.sha256(raw_url.encode("utf-8")).hexdigest(),
+                               "category": "static_candidate", "dex_locations": item["dex_locations"],
+                               "source_occurrences": matches[key],
+                               "source_occurrence_count": len(matches[key])})
+    return store.add("analysis", {
+        "schema": "forge.android-api-map/v1", "tool": "android", "action": "api-map",
+        "success": True, "index_evidence_id": index_record["id"], "jadx_evidence_id": jadx_record["id"],
+        "evidence_ids": [index_record["id"], jadx_record["id"]], "index_sha256": index_sha256,
+        "index_records_scanned": index_records, "index_truncated": bool(index_data.get("truncated")),
+        "candidate_count": len(api_candidates), "candidate_omitted": candidate_omitted,
+        "source_root": _relative(store, source_root), "class_filter": source_filters,
+        "source_files_scanned": source_files_scanned,
+        "source_bytes_scanned": source_bytes_scanned, "source_files_omitted": source_files_omitted,
+        "source_bytes_omitted": source_bytes_omitted, "source_occurrence_count": source_occurrences,
+        "source_occurrences_omitted": source_occurrences_omitted,
+        "api_candidates": api_candidates,
+        "truncated": truncated or source_truncated,
+        "scope": "Static mapping only: a URL string and matching decompiled source literal do not prove a "
+                 "request builder dispatches it, the app executed it, or a server accepted it. Inspect caller "
+                 "logic and correlate with captured/live HTTP before treating it as an API flow."
+    })
+
+
 def jadx(args, store):
     source = _input(store, args.path, local=True)
     if not source.is_file():
@@ -749,6 +960,19 @@ def register(subparsers):
     parser.add_argument("--max-matches", type=_positive, default=100)
     _limits(parser)
     parser.set_defaults(handler=search)
+    parser = subparsers.add_parser("android-api-map",
+                                  help="Map DEX URL candidates to exact literal occurrences in cited JADX output")
+    parser.add_argument("--index-evidence", required=True, help="Static-index evidence created with --dex")
+    parser.add_argument("--jadx-evidence", required=True, help="Successful or partial JADX evidence")
+    parser.add_argument("--class-filter", action="append", default=[],
+                        help="Optional dotted-class/path substring filter; repeat to include another class")
+    parser.add_argument("--max-index-bytes", type=_positive, default=256 * 1024 * 1024)
+    parser.add_argument("--max-candidates", type=_positive, default=500)
+    parser.add_argument("--max-source-files", type=_positive, default=50000)
+    parser.add_argument("--max-source-bytes", type=_positive, default=512 * 1024 * 1024)
+    parser.add_argument("--max-source-file-bytes", type=_positive, default=16 * 1024 * 1024)
+    parser.add_argument("--max-occurrences", type=_positive, default=10000)
+    parser.set_defaults(handler=android_api_map)
 
     parser = subparsers.add_parser("jadx", help="Run installed JADX with project-local output and saved execution evidence")
     parser.add_argument("path")
