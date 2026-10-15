@@ -92,6 +92,34 @@ callgraph. Kotlin/smali and malformed source remain literal citations with unsup
 `trace_items_omitted` before interpreting an empty result. This step requires neither root nor
 Frida and makes no device changes.
 
+## Capture the app's own traffic without root
+
+`adb observe` reads logcat, not HTTP. To get real host evidence from an unrooted device, use the installed
+PCAPdroid app through its documented Intent API:
+
+```console
+forge pcapdroid-preflight --serial OWNED_DEVICE_SERIAL --package com.example.app
+forge pcapdroid-capture --serial OWNED_DEVICE_SERIAL --package com.example.app --path captures/run.pcap --seconds 20
+forge pcap-analyze captures/run.pcap --capture-evidence "<capture-id>" --map-evidence "<api-map-id>"
+```
+
+`pcapdroid-capture` prints a ready line once the scoped `CaptureService` is running and the generated dump
+file exists (it may still be 0 bytes), then waits out the bounded window while the operator performs one named
+action. The app may ask for consent on start and stop; a prompt left open is reported as a blocker, not retried.
+Root capture, TLS decryption, SOCKS5, PCAPNG, private-DNS blocking and remote exporters are all sent as off.
+`success` requires an observed service, the generated dump name, an observed stop and a hash-verified retrieval.
+
+`pcap-analyze` then reports DNS names, TLS ClientHello SNI, plaintext HTTP `Host`, per-direction flows and the
+optional PCAPdroid trailer UID/app-name claims. It never retains or prints payload, request targets, headers or
+bodies, and it never decrypts. With `--capture-evidence` it checks the cited capture hash/size/path and splits
+observations and packets by the trailer UID claim, so packets without a claim stay `unknown` instead of being
+credited to the target. With `--map-evidence` it re-hashes the cited static index and lists exact hostname
+matches: that ties an APK URL candidate to an observed host, and still does not prove a path, method, body or
+authenticated call. A zero-length or headerless dump is a start observation, never traffic or success.
+
+The raw PCAP stays local and may contain private data. This path needs no root, no certificate install, no
+pinning bypass, no app re-signing and no emulator.
+
 ## Install a selected APK set
 
 Use only APKs you own or are authorized to install on the selected device. The package must not already be installed under this command's new-install policy.

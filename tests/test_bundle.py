@@ -56,6 +56,40 @@ class BundleTests(unittest.TestCase):
         self.assertFalse(result["manifest"]["raw_materials_included"])
         self.assertTrue(result["manifest"]["closure_complete"])
 
+    def test_packet_capture_handoff_keeps_provenance_but_withholds_hosts_ips_and_payload(self):
+        capture = self.store.add("runtime", {
+            "schema": "forge.pcapdroid/v1", "tool": "pcapdroid", "action": "capture", "success": True,
+            "capture": {"path": "captures/private.pcap", "sha256": "c" * 64, "size": 128},
+            "api_key": "privateCaptureControlSecret",
+            "capture_started_observed": True, "capture_stopped_observed": True})
+        analysis = self.store.add("analysis", {
+            "schema": "forge.pcap/v1", "tool": "pcap", "action": "pcap-analyze",
+            "category": "captured_network", "evidence_ids": [capture["id"]],
+            "packets_scanned": 2, "captured_packet_truncations": 1, "decryption_performed": False,
+            "hosts": [{"hostname": "private-host.example",
+                       "observations": [{"kind": "tls_sni", "packet_index": 2, "timestamp": 100.5,
+                                         "source_ip": "192.168.77.23", "destination_ip": "203.0.113.99",
+                                         "uid": 10233, "package_hint": "private.hint.app"}]}],
+            "static_host_matches": [{"hostname": "private-host.example",
+                                     "static_candidate_sha256": "d" * 64,
+                                     "category": "static_host_match", "evidence_ids": [capture["id"]]}],
+            "raw": "privatePacketPayloadCookie"})
+        self.export([analysis["id"]])
+        members = self.read_members()
+        packed = b"\n".join(members.values()).decode()
+        for private in ("private-host.example", "192.168.77.23", "203.0.113.99",
+                        "private.hint.app", "captures/private.pcap",
+                        "privateCaptureControlSecret", "privatePacketPayloadCookie"):
+            self.assertNotIn(private, packed)
+        shared = json.loads(members["evidence.json"])["records"]
+        self.assertEqual({row["id"] for row in shared}, {capture["id"], analysis["id"]})
+        facts = next(row["facts"] for row in shared if row["id"] == analysis["id"])
+        self.assertEqual(facts["category"], "captured_network")
+        self.assertEqual(facts["captured_packet_truncations"], 1)
+        self.assertFalse(facts["decryption_performed"])
+        self.assertEqual(facts["static_host_matches"][0]["category"], "static_host_match")
+        self.assertEqual(facts["static_host_matches"][0]["static_candidate_sha256"], "d" * 64)
+
     def test_android_lab_metadata_is_exportable_but_logs_ui_and_local_paths_are_not(self):
         pulled = self.store.add("runtime", {
             "tool": "adb", "action": "pull-package", "success": True, "package": "com.example.app",

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.0 - 2026-10-15
+
+- New `pcapdroid-preflight` and `pcapdroid-capture` drive the installed PCAPdroid app through its documented ADB Intent API. A session is `success` only when the generated dump name was observed, the scoped `CaptureService` was seen running, the stop was observed to take it down, and a new PCAP was retrieved and hashed. An accepted `am start` alone is a dispatch observation, not capture success.
+- New `pcap-analyze` parses one classic PCAP under caps and reports bounded packet/connection metadata: DNS names, TLS ClientHello SNI, plaintext HTTP `Host`, per-direction flows and optional PCAPdroid trailer UID/hint claims. Payload bytes, bodies, URLs and headers are never retained or printed; no decryption is performed and none is claimed.
+- With `--capture-evidence` it verifies the cited capture record hash/size/path, splits observations and packets by the trailer UID claim, and treats absent claims as unknown rather than target traffic. With `--map-evidence` it re-hashes the cited static index and reports exact hostname matches, so an APK URL candidate can be tied to an observed host without promoting a path, method or body to runtime proof.
+- Fixed two defects found on hardware: the PCAPdroid Ethernet FCS is little-endian, and TCP payloads are now placed by sequence number, so a retransmission is not appended twice and a gap is reported instead of guessed.
+- `--max-bytes` now caps both the requested device dump and host retrieval; a device dump above the cap is refused before anything is pulled.
+- Exercised on the connected Xiaomi Pad 6 (Android 14) with the installed Grok build: a bounded 20-second `ai.x.grok` session retrieved 24,516 bytes; analysis decoded 76 packets, 3 hosts and 16 flows, attributed 74/76 packets to the target UID, and matched 11 static `grok.com` candidates. No root, CA, pinning bypass, signing change or app preference edit was used, and no endpoint is reported as an authenticated API call.
+
 ## 0.12.0 - 2026-10-15
 
 - `android-api-map` now adds same-file Java `source_traces`: method contexts, direct String field initializers, unique same-arity constructor-parameter field assignments, field reads, and one-hop caller-name candidates. Literal, declaration and assignment lines retain the source hash.

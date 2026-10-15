@@ -8,4 +8,4 @@ prune notes
 prune .forge
 prune dist
 prune build
-global-exclude __pycache__ *.py[cod] *.egg-info .env .env.* *.sqlite* *.db *.har *.apk *.apks *.xapk *.exe *.dll *.log *.pem *.key
+global-exclude __pycache__ *.py[cod] *.egg-info .env .env.* *.sqlite* *.db *.har *.pcap *.pcapng *.apk *.apks *.xapk *.exe *.dll *.log *.pem *.key

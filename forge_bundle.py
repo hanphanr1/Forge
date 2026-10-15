@@ -26,22 +26,23 @@ _ENUMS = {
     "expected_bucket": {"HIT", "FREE", "FAIL"},
     "control": {"positive", "negative"},
     "state": {"OBSERVED", "INFERRED", "UNKNOWN", "CONTRADICTED", "active", "blocked", "completed"},
-    "category": {"static_candidate", "captured_http", "live_http"},
+    "category": {"static_candidate", "captured_http", "live_http", "captured_network", "static_host_match"},
     "source": {"static_candidate", "captured_http", "live_http", "live_probe", "har_import", "local_import"},
     "member_filter": {"dex"},
     "context_kind": {"method", "field_initializer", "class_scope", "comment", "unsupported"},
     "resolution": {"syntactic_constructor_binding", "direct_field_initializer",
                    "same_class_field_candidate", "same_class_name_candidate"},
     "marker_kind": {"url_call", "dispatch_call", "retrofit_annotation"},
+    "kind": {"dns_query", "dns_answer", "tls_sni", "http_host"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
-             "idevice_id", "idevicepair"},
+             "idevice_id", "idevicepair", "pcap", "pcapdroid"},
     "action": {"imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph", "devices", "install",
                "install-multiple", "preflight", "pull", "push", "pull-package", "observe", "packages", "package",
                "frida-prerequisite", "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices",
-               "ios-pair", "decompile", "api-map"},
+               "ios-pair", "decompile", "api-map", "capture", "pcap-analyze"},
     "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
-               "forge.apk/v1", "forge.ios.v1"},
+               "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
                "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
                "observed", "paired", "not-paired", "unknown"},
@@ -53,6 +54,14 @@ _NUMBERS |= {"trace_items", "trace_items_omitted", "literal_line", "literal_colu
              "method_line", "method_end_line", "constructor_line", "argument_index",
              "assignment_line", "overload_count"}
 _CONTAINERS |= {"source_traces", "field_links", "uses", "callers", "request_markers"}
+_PRIVATE |= {"hostname", "source_ip", "destination_ip", "uid", "package_hint", "remote",
+             "remote_name", "api_key", "api_key_env", "collector_host"}
+_FLAGS |= {"decryption_performed", "capture_started_observed", "capture_stopped_observed",
+           "package_hint_truncated"}
+_NUMBERS |= {"packets_scanned", "malformed_packets", "unsupported_packets", "packet_index",
+             "timestamp", "source_port", "destination_port", "hosts_omitted",
+             "flows_omitted", "host_observations_omitted", "captured_packet_truncations"}
+_CONTAINERS |= {"capture", "hosts", "flows", "static_host_matches"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",
@@ -61,6 +70,7 @@ _SCOPE = [
     "Unknown fields and free-text limitations are withheld. Inspect the manifest and cited local records before disclosure.",
 ]
 _PUBLIC = _FLAGS | _NUMBERS | _CONTAINERS | _REFERENCES | set(_ENUMS) | {"sha256", "source_sha256", "output_sha256", "protocol_sha256", "binary_sha256", "url", "endpoint", "package", "version_name", "version_code", "primary_cpu_abi", "split_names", "split", "class_name", "dex_member"}
+_PUBLIC |= {"static_candidate_sha256"}
 
 
 def _references(value):
@@ -115,7 +125,7 @@ def _project(value, key="", depth=0, budget=None):
         return {"name": value["name"]} if value.get("name") in _ENUMS["tool"] else None
     if key in _ENUMS:
         return value if isinstance(value, str) and value in _ENUMS[key] else None
-    if key in {"sha256", "source_sha256", "output_sha256", "protocol_sha256", "binary_sha256"}:
+    if key in {"sha256", "source_sha256", "output_sha256", "protocol_sha256", "binary_sha256", "static_candidate_sha256"}:
         return value if isinstance(value, str) and _HASH.fullmatch(value) else None
     if key in {"url", "endpoint"} and isinstance(value, str):
         return {"redacted_identity_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(), "identity_withheld": True}
