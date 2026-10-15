@@ -55,12 +55,14 @@ Index/search reader limits: `--max-file-bytes`, `--max-total-bytes`, `--max-entr
 These are syntactic candidates, not resolved calls or value propagation. Caller matches retain `overload_count`, without selecting an overload. Markers such as `url(...)`, `newCall(...)`, `execute(...)`, `enqueue(...)`, `performRequest(...)` and HTTP annotations only co-occur in an enclosing method; no client type or network dispatch is proven. Only the first top-level Java type is traced. Nested/local/anonymous classes, malformed Java, Kotlin and smali retain literal citations without Java method resolution. Qualified constructor names are not bound by their last name. Cross-file callers, inheritance, reflection and generated URLs remain unresolved. Pair candidates with captured/live HTTP before treating them as an API flow. Bundles withhold local paths and method/field/parameter names, retaining bounded structural metadata.
 
 
-`android-caller-map --jadx-evidence ID --method NAME [--class OWNER]` scans a cited JADX output for call sites of
-one method name across files: bare calls list possible owner classes from imports and the same package,
-`this.`/owner-class/named-receiver/expression/constructor receivers are classified, declarations and annotation
-uses are skipped, and `--class` filters by attribution. Results are cross-file **name candidates**
-(`cross_file_name_candidate`): overload resolution, inheritance, reflection and generated call sites are not
-resolved, caps and omissions are reported, and each candidate keeps the calling file's class/line and hash.
+`android-caller-map --jadx-evidence ID --method NAME [--class OWNER] [--path-filter SUBSTRING]` scans a cited
+JADX output for call sites of one method name: bare calls list possible owner classes from imports and the same
+package, `this.`/owner-class/named-receiver/expression/constructor receivers are classified, declarations and
+annotation uses are skipped, and `--class` filters by attribution. Repeatable `--path-filter` scopes the walk to
+a path/class substring (recorded in the evidence), so following one package does not tokenize the whole tree.
+Results are cross-file **name candidates** (`cross_file_name_candidate`): overload resolution, inheritance,
+reflection and generated call sites are not resolved, caps and omissions are reported, and each candidate keeps
+the calling file's class/line and hash.
 
 `search` reads generated `index.jsonl` files under `--max-total-bytes`; `--max-file-bytes` applies to ordinary source files and archive members, while each index JSON record has a fixed 128 KiB cap. This lets a bounded index larger than one source-file cap remain searchable. `--max-records` can still truncate a large index; check `truncated` and `records_scanned` before treating a no-match result as meaningful.
 
@@ -156,7 +158,11 @@ request: FORGE installs no CA, adds no trust anchor and edits nothing, so a pinn
 encrypted and the request is never claimed as performed), `--repeat N` with `--gap SECONDS`, and per-window
 `--launch PACKAGE/ACTIVITY` / `--force-stop`: each window writes its own `window-NN.pcap` and evidence record
 under one `capture-session` record, and a window failure stops further windows while completed files, hashes
-and records stay intact.
+and records stay intact. `pcapdroid-preflight` also observes the PCAPdroid MITM addon (`com.pcapdroid.mitm`) as
+its own scoped fact, and `--tls-decryption` refuses with `mitm-addon-absent` before any Intent is sent when
+that addon is missing — the hardware failure mode otherwise looks like a consent timeout that never resolves.
+`--continue-on-error` keeps later windows running after one fails while the session record still reports
+`success: false`; the default is stop-at-first-failure.
 
 `capture-ingest` runs a bounded loopback listener so a capture tool can push HAR directly instead of a manual export/import. It binds `127.0.0.1` only, stops at `--seconds` (1..3600), `--max-records` or an error, and accepts a HAR document, an entries array or one entry object. Each exchange is stored through the same normalization as `har-import`, so pushed traffic stays `captured_http` and is never promoted to live proof. With `--port 0` the chosen port is announced once on stderr; stdout stays `{ok, result}`. `--token` requires a matching `X-Forge-Token` or `Authorization: Bearer` header. Oversized bodies, wrong method/route, a bad token and malformed JSON are rejected with per-reason counters and never echo request data.
 

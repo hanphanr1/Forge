@@ -452,6 +452,15 @@ class CommandBehaviorTests(unittest.TestCase):
                 self.assertFalse(any("install" in call.args[0] for call in calls.call_args_list))
             self.assertTrue(self.base.exists())
 
+    def test_installer_option_is_registered_on_split_install_not_apk_info(self):
+        parser = argparse.ArgumentParser()
+        android.register(parser.add_subparsers())
+        args = parser.parse_args(["adb-install-splits", "--apk", "base.apk",
+                                  "--installer", "com.android.vending"])
+        self.assertEqual(args.installer, "com.android.vending")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["apk-info", "--installer", "com.android.vending"])
+
     def test_invalid_metadata_rejected_before_any_adb_dispatch(self):
         self.base.write_bytes(apk_bytes(manifest(version="@integer/version")))
         with patch.object(android, "_run") as calls, self.assertRaises(ForgeError):
