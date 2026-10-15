@@ -35,7 +35,8 @@ See [checkpoints](checkpoints.md) for lifecycle and state invariants. `--blocker
 forge --project target artifact-add client.apk --source-url "<observed-publication-url>" --platform android --version "<observed-version>"
 forge --project target artifact-fetch "<observed-download-url>" --sha256 "<expected-hash>"
 forge --project target artifact-index ".forge/blobs/<returned-sha256>"
-forge --project target search "/api/" ".forge/indexes/<returned-index-id>/index.jsonl"
+forge --project target artifact-index pulled/app/base.apk --dex --max-records 500000 --max-index-bytes 268435456
+forge --project target search "grok.com" ".forge/indexes/<returned-index-id>/index.jsonl" --max-records 500000
 ```
 
 Use returned paths and IDs, not guessed ones. `artifact-add` preserves the supplied original. SHA-256 identifies content, not publisher authenticity.
@@ -43,6 +44,10 @@ Use returned paths and IDs, not guessed ones. `artifact-add` preserves the suppl
 Artifact import/download options: `--version`, `--platform`, `--sha256`, `--max-bytes` (default 256 MiB). Fetch also has `--timeout` and `--max-redirects`; artifact downloads may follow redirects, unlike live HTTP probes.
 
 Index/search reader limits: `--max-file-bytes`, `--max-total-bytes`, `--max-entries`, `--max-records`, `--min-string-length`. Index adds `--max-index-bytes`. Search accepts one or more explicitly scoped paths, `--regex`, `--ignore-case`, `--max-matches`.
+
+`artifact-index APK --dex` selects only root `classes*.dex` members of an APK/ZIP. It skips resources and metadata before they consume the record cap, while each string citation still names the DEX member and byte offset. The mode is explicit; it does not infer application behavior from a string.
+
+`search` reads generated `index.jsonl` files under `--max-total-bytes`; `--max-file-bytes` applies to ordinary source files and archive members, while each index JSON record has a fixed 128 KiB cap. This lets a bounded index larger than one source-file cap remain searchable. `--max-records` can still truncate a large index; check `truncated` and `records_scanned` before treating a no-match result as meaningful.
 
 Index/search output includes source locations and truncation/skip facts. New static indexes record creation-time JSONL SHA-256 and size. ZIP members are read without extracting their paths. Gzip indexing is bounded and marks offsets as decompressed-space locations. The bounded ZIP reader does not support ZIP64 or multi-disk archives. Directory indexing excludes known account/proxy/key data, results and dependency/cache directories.
 

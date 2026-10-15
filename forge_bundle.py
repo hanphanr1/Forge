@@ -28,6 +28,7 @@ _ENUMS = {
     "state": {"OBSERVED", "INFERRED", "UNKNOWN", "CONTRADICTED", "active", "blocked", "completed"},
     "category": {"static_candidate", "captured_http", "live_http"},
     "source": {"static_candidate", "captured_http", "live_http", "live_probe", "har_import", "local_import"},
+    "member_filter": {"dex"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
              "idevice_id", "idevicepair"},

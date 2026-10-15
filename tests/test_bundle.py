@@ -68,7 +68,9 @@ class BundleTests(unittest.TestCase):
             "duration_seconds": 60, "time_window_filtered": True, "logcat_line_count": 1,
             "logcat_lines": ["Authorization: Bearer private-session-token"],
             "ui_snapshots": {"before": {"xml": "private screen content"}}})
-        self.export([pulled["id"], observed["id"]])
+        indexed = self.store.add("analysis", {"tool": "static_index", "member_filter": "dex",
+                                              "records": 1, "truncated": False})
+        self.export([pulled["id"], observed["id"], indexed["id"]])
         members = self.read_members()
         packed = b"\n".join(members.values()).decode()
         self.assertIn("pull-package", packed)
@@ -76,6 +78,7 @@ class BundleTests(unittest.TestCase):
         self.assertIn("com.example.app", packed)
         self.assertIn("version_name", packed)
         self.assertIn("a" * 64, packed)
+        self.assertIn('"member_filter": "dex"', packed)
         self.assertNotIn("pulled/app/base.apk", packed)
         self.assertNotIn("private-session-token", packed)
         self.assertNotIn("private screen content", packed)

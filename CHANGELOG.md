@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.0 - 2026-10-15
+
+- `artifact-index --dex` indexes only root `classes*.dex` members of an APK/ZIP. Resource and license entries no longer consume the record budget before DEX strings, and matches retain the exact archive member and byte-offset citation.
+- `search` can read generated `index.jsonl` files larger than `--max-file-bytes`; the index still has the `--max-total-bytes`, per-record-size and `--max-records` bounds. A capped search reports `truncated`, so no-match does not imply absence.
+- Measured on the installed Grok 1.2.45 build pulled from the connected Pad: DEX-only indexing produced 471,851 records across the DEX members without truncation. Search found static candidates including `https://grok.com/_data/v1/analytics`, `https://grok.com/_worker/typeahead`, `https://accounts.x.ai/`, and `wss://grok.com/ws/mgw/`. These are strings in the installed APK, not proof the app called them or that they work.
+- A full JADX run on the 52 MB base APK took 14m 27s and returned partial decompilation with 23,387 usable Java files. Broad search over that tree timed out. DEX-first indexing reached the string candidates in 76s; call-site behavior still needs targeted decompilation or a runtime capture.
+- Agent workflow and CLI docs now recommend pull installed splits, index DEX first, search cited members, then decompile targeted classes and collect live observations when hardware is available.
+
 ## 0.9.0 - 2026-10-15
 
 - New `adb pull-package` copies the installed package manager's exact base/split paths into a new project-local directory. FORGE hashes each APK, records the installed version facts and parses each manifest when possible; the copy does not install, replace or authenticate the publisher.

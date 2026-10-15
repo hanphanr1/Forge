@@ -1,6 +1,7 @@
 import argparse
 import gzip
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -61,6 +62,44 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertEqual(login["location"]["member"], "classes.dex")
         self.assertNotIn("https://unsafe.example/api/login", [item["value"] for item in candidates])
 
+
+    def test_dex_only_mode_skips_earlier_archive_resources_and_keeps_member_citation(self):
+        archive = self.root / "installed.apk"
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("META-INF/license.txt", "license metadata\nother metadata\n")
+            output.writestr("classes.dex", b"dex\n035\x00\x00https://api.example.test/v1/login\x00")
+        record = self.command("artifact-index", str(archive), "--max-records", "1")
+        self.assertNotIn("https://api.example.test/v1/login",
+                         [item["value"] for item in record["data"]["endpoint_candidates"]])
+        dex = self.command("artifact-index", str(archive), "--dex", "--max-records", "1")
+        candidate = next(item for item in dex["data"]["endpoint_candidates"]
+                         if item["value"] == "https://api.example.test/v1/login")
+        self.assertEqual(candidate["location"]["member"], "classes.dex")
+        self.assertEqual(dex["data"]["member_filter"], "dex")
+        self.assertFalse(candidate["proven_live"])
+
+    def test_dex_only_mode_refuses_nonarchives_and_archives_without_dex(self):
+        source = self.root / "source.js"
+        source.write_text("not an archive")
+        with self.assertRaisesRegex(ForgeError, "requires a ZIP/APK archive"):
+            self.command("artifact-index", str(source), "--dex")
+        archive = self.root / "no-dex.apk"
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("assets/config.json", '{"ok":true}')
+        with self.assertRaisesRegex(ForgeError, "no root classes"):
+            self.command("artifact-index", str(archive), "--dex")
+
+    def test_search_reads_generated_indexes_above_the_source_file_cap(self):
+        index = self.root / "index.jsonl"
+        records = [{"source": "client.dex", "member": "classes.dex", "byte_offset": number,
+                    "kind": "binary_string", "text": f"https://api.example.test/v{number}/login"}
+                   for number in range(20)]
+        index.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        record = self.command("search", "api.example.test", "index.jsonl",
+                              "--max-file-bytes", "8", "--max-total-bytes", "4096")
+        self.assertEqual(record["data"]["records_scanned"], 20)
+        self.assertFalse(record["data"]["truncated"])
+        self.assertEqual(len(record["data"]["matches"]), 20)
     def test_member_limit_does_not_discard_entire_large_archive(self):
         archive = self.root / "client.zip"
         with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as output:

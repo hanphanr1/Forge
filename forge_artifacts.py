@@ -375,14 +375,32 @@ def _content_records(data, name, location, budget):
                           line=number, column=column + 1, kind="text")
 
 
-def _archive_records(path, source_name, budget):
+def _archive_records(path, source_name, budget, dex_only=False):
     _zip_entries(path, budget.args.max_entries - budget.entries + 1)
     try:
         with zipfile.ZipFile(path) as archive:
-            for info in archive.infolist():
+            infos = archive.infolist()
+            if dex_only:
+                file_infos = [info for info in infos if not info.is_dir()]
+                dex_infos = [info for info in file_infos
+                             if "/" not in info.filename and re.fullmatch(r"classes\d*\.dex", info.filename)]
+                dex_names = [info.filename for info in dex_infos]
+                if not dex_infos:
+                    raise ForgeError("Archive contains no root classes*.dex members")
+                if len(set(dex_names)) != len(dex_names):
+                    raise ForgeError("Archive contains duplicate classes*.dex member names")
+                budget.entries += len(file_infos)
+                if budget.entries > budget.args.max_entries:
+                    budget.skip(source_name, "archive reached --max-entries before selected DEX indexing")
+                    return
+                selected_infos = dex_infos
+            else:
+                selected_infos = infos
+            for info in selected_infos:
                 if info.is_dir():
                     continue
-                budget.entries += 1
+                if not dex_only:
+                    budget.entries += 1
                 location = {"source": source_name, "member": info.filename,
                             "member_header_offset": info.header_offset, "member_crc32": f"{info.CRC:08x}"}
                 if budget.entries > budget.args.max_entries:
@@ -439,7 +457,7 @@ def _gzip_records(path, source_name, budget):
         yield from _content_records(data, path.stem, location, budget)
 
 
-def _scan(paths, store, budget):
+def _scan(paths, store, budget, dex_only=False):
     for path in paths:
         for source in _files(path, budget):
             budget.entries += 1
@@ -451,12 +469,14 @@ def _scan(paths, store, budget):
             with source.open("rb") as handle:
                 magic = handle.read(4)
             if source.suffix.lower() in ARCHIVES or magic.startswith(b"PK"):
-                records = _archive_records(source, source_name, budget)
+                records = _archive_records(source, source_name, budget, dex_only=dex_only)
             elif magic.startswith(b"\x1f\x8b"):
                 records = _gzip_records(source, source_name, budget)
             elif source.name == "index.jsonl":
-                if not budget.consume(size, source_name):
+                if size > budget.args.max_total_bytes - budget.bytes:
+                    budget.skip(source_name, "exceeds --max-total-bytes")
                     continue
+                budget.bytes += size
                 records = _indexed_records(source, source_name, budget)
             else:
                 if not budget.consume(size, source_name):
@@ -484,6 +504,14 @@ def _candidates(record):
 
 def artifact_index(args, store):
     path = _input(store, args.path, local=True)
+    dex_only = getattr(args, "dex", False)
+    if dex_only:
+        if not path.is_file():
+            raise ForgeError("--dex requires one APK/ZIP artifact, not a directory")
+        with path.open("rb") as source:
+            is_zip = source.read(4).startswith(b"PK")
+        if not is_zip:
+            raise ForgeError("--dex requires a ZIP/APK archive")
     budget = _Budget(args)
     output_dir = _area(store, "indexes") / uuid.uuid4().hex
     output_dir.mkdir()
@@ -496,7 +524,7 @@ def artifact_index(args, store):
     index_size = 0
     try:
         with temp.open("x", encoding="utf-8", newline="\n") as handle:
-            for record in _scan([path], store, budget):
+            for record in _scan([path], store, budget, dex_only=dex_only):
                 serialized = json.dumps(record, ensure_ascii=True) + "\n"
                 encoded = serialized.encode("utf-8")
                 written += len(encoded)
@@ -521,6 +549,7 @@ def artifact_index(args, store):
             output_dir.rmdir()
     return store.add("analysis", {
         "tool": "static_index", "input": _relative(store, path), "path": _relative(store, output),
+        "member_filter": "dex" if dex_only else None,
         "index_sha256": index_hash.hexdigest(), "index_size": index_size,
         "records": saved_records, "entries": budget.entries, "bytes_read_budget": budget.bytes,
         "truncated": budget.truncated, "skipped": budget.skipped, "endpoint_candidates": candidates,
@@ -707,6 +736,8 @@ def register(subparsers):
     parser = subparsers.add_parser("artifact-index", help="Index explicit project-local files or artifact directories")
     parser.add_argument("path")
     parser.add_argument("--max-index-bytes", type=_positive, default=64 * 1024 * 1024)
+    parser.add_argument("--dex", action="store_true",
+                        help="Index only root classes*.dex members of an APK/ZIP instead of resources and metadata")
     _limits(parser)
     parser.set_defaults(handler=artifact_index)
 
