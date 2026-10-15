@@ -18,8 +18,9 @@ _ID = re.compile(r"ev_[a-f0-9]{32}\Z")
 _HASH = re.compile(r"[a-f0-9]{64}\Z")
 _REFERENCES = {"evidence", "evidence_id", "evidence_ids", "citations", "positive", "negative", "runs", "verification", "included", "before_id", "after_id", "before", "after"}
 _PRIVATE = {"body", "text", "stdout", "stderr", "raw", "content", "script", "snippet", "command", "command_template", "args", "args_template", "stdin_json", "stdin_template", "goal", "next_action", "notes", "source_path", "filename", "source_url", "final_url", "path", "input", "output", "version_output"}
-_FLAGS = {"success", "passed", "timed_out", "truncated", "source_changed", "runtime_changed", "window_truncated", "input_truncated", "output_truncated", "fields_omitted", "observations_omitted", "citations_omitted", "authentication_verified", "proven_auth_path", "proven_live", "empty", "stopped", "complete", "sampling_possible", "is_compatible", "binary_unchanged", "file_inventory_complete", "server_changes_verified", "schema_inferred", "network_performed", "values_exported", "fragment_expansion_performed", "response_observed", "partial", "apply", "dry_run", "force", "read_only", "network_action", "device_write", "pseudo_c_truncated", "embedded_gadget_matches"}
-_NUMBERS = {"size", "index_size", "schema_version", "status", "response_status", "returncode", "exit_code", "elapsed_ms", "stdout_bytes", "stderr_bytes", "records", "entries", "converted", "available", "omitted", "completed", "requested", "line", "column", "byte_offset", "offset", "depth", "count", "min_sdk", "api_level", "java_files", "error_count", "record_bytes", "blob_bytes", "bytes_freed", "blobs", "orphan_blobs", "referenced_blobs", "pseudo_c_lines", "gadget_size", "gadget_bitness", "archive_entries"}
+_FLAGS = {"success", "passed", "timed_out", "truncated", "source_changed", "runtime_changed", "window_truncated", "input_truncated", "output_truncated", "fields_omitted", "observations_omitted", "citations_omitted", "authentication_verified", "proven_auth_path", "proven_live", "empty", "stopped", "complete", "sampling_possible", "is_compatible", "binary_unchanged", "file_inventory_complete", "server_changes_verified", "schema_inferred", "network_performed", "values_exported", "fragment_expansion_performed", "response_observed", "partial", "apply", "dry_run", "force", "read_only", "network_action", "device_write", "pseudo_c_truncated", "embedded_gadget_matches", "time_window_filtered"}
+_NUMBERS = {"size", "index_size", "schema_version", "status", "response_status", "returncode", "exit_code", "elapsed_ms", "stdout_bytes", "stderr_bytes", "records", "entries", "converted", "available", "omitted", "completed", "requested", "line", "column", "byte_offset", "offset", "depth", "count", "min_sdk", "api_level", "java_files", "error_count", "record_bytes", "blob_bytes", "bytes_freed", "blobs", "orphan_blobs", "referenced_blobs", "pseudo_c_lines", "gadget_size", "gadget_bitness", "archive_entries", "bytes_pulled", "duration_seconds", "logcat_line_count", "logcat_line_cap_per_pid", "logcat_omitted_lines", "process_rows_omitted_before", "process_rows_omitted_after", "session_pids_omitted"}
+_SAFE_STRINGS = {"package", "version_name", "version_code", "primary_cpu_abi", "split", "split_names"}
 _ENUMS = {
     "bucket": {"HIT", "FREE", "FAIL", "TERMINAL", "RETRY", "ERROR", "BADFORMAT", "CUSTOM", "RISK"},
     "expected_bucket": {"HIT", "FREE", "FAIL"},
@@ -31,16 +32,16 @@ _ENUMS = {
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
              "idevice_id", "idevicepair"},
     "action": {"imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph", "devices", "install",
-               "install-multiple", "preflight", "pull", "push", "packages", "package", "frida-prerequisite",
-               "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices", "ios-pair",
-               "decompile"},
+               "install-multiple", "preflight", "pull", "push", "pull-package", "observe", "packages", "package",
+               "frida-prerequisite", "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices",
+               "ios-pair", "decompile"},
     "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
                "forge.apk/v1", "forge.ios.v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
                "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
                "observed", "paired", "not-paired", "unknown"},
 }
-_CONTAINERS = {"sources_before", "sources_after", "current_sources", "files", "facts", "binary", "binary_before", "binary_after", "runtime", "runtime_before", "runtime_after", "runtime_current", "fingerprint", "executable", "before", "after", "limits", "selection", "map", "identity", "endpoints", "observations", "before_observations", "after_observations", "before_scope", "after_scope", "citations", "location", "request", "response", "device", "devices", "counts", "summary", "changes", "added", "removed", "changed", "planned", "deleted", "filters", "invocation"}
+_CONTAINERS = {"sources_before", "sources_after", "current_sources", "files", "facts", "package_facts", "manifest", "binary", "binary_before", "binary_after", "runtime", "runtime_before", "runtime_after", "runtime_current", "fingerprint", "executable", "before", "after", "limits", "selection", "map", "identity", "endpoints", "observations", "before_observations", "after_observations", "before_scope", "after_scope", "citations", "location", "request", "response", "device", "devices", "counts", "summary", "changes", "added", "removed", "changed", "planned", "deleted", "filters", "invocation"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",
@@ -48,7 +49,7 @@ _SCOPE = [
     "Hashes identify declared bytes, not dependency closure, signing, device identity or every transient modification.",
     "Unknown fields and free-text limitations are withheld. Inspect the manifest and cited local records before disclosure.",
 ]
-_PUBLIC = _FLAGS | _NUMBERS | _CONTAINERS | _REFERENCES | set(_ENUMS) | {"sha256", "source_sha256", "output_sha256", "protocol_sha256", "binary_sha256", "url", "endpoint"}
+_PUBLIC = _FLAGS | _NUMBERS | _CONTAINERS | _REFERENCES | set(_ENUMS) | {"sha256", "source_sha256", "output_sha256", "protocol_sha256", "binary_sha256", "url", "endpoint", "package", "version_name", "version_code", "primary_cpu_abi", "split_names", "split"}
 
 
 def _references(value):
@@ -93,6 +94,12 @@ def _project(value, key="", depth=0, budget=None):
         return value if type(value) is bool else None
     if key in _NUMBERS and type(value) in (int, float):
         return value if abs(value) < 10**20 else None
+    if key in _SAFE_STRINGS and isinstance(value, str) and len(value) <= 256 and not any(ord(char) < 32 for char in value):
+        if key == "package" and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", value):
+            return None
+        if key == "version_code" and not re.fullmatch(r"\d{1,20}", value):
+            return None
+        return scrub_text(value)
     if key == "tool" and isinstance(value, dict):
         return {"name": value["name"]} if value.get("name") in _ENUMS["tool"] else None
     if key in _ENUMS:

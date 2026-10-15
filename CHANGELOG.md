@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 - 2026-10-15
+
+- New `adb pull-package` copies the installed package manager's exact base/split paths into a new project-local directory. FORGE hashes each APK, records the installed version facts and parses each manifest when possible; the copy does not install, replace or authenticate the publisher.
+- New `adb observe` holds a bounded interaction window open for an already-running app, samples package PIDs at the start and end, and retains time-filtered logcat rows for those processes. Optional `--ui-snapshots` records before/after UI trees, with an explicit warning that screen text may be private.
+- The Android Lab workflow now tells agents to inspect and pull the installed build, observe one named app action, and pair the session with an authorized HAR capture when API traffic is needed. `adb observe` is not an HTTP capture, TLS decryptor or pinning bypass.
+- Bundle projections carry Android Lab action names and safe package/hash/counter metadata. Local APK paths, raw logcat and UI trees remain excluded.
+- Host-only fixtures cover installed split collection, cleanup on pull failure, PID/time-filtered app logcat, opt-in UI cleanup, and bundle redaction. No tablet was connected for this release's verification.
+
 ## 0.8.0 - 2026-10-07
 
 - `frida` gains `--host HOST:PORT` and `--forward PORT`: the first attaches to a Gadget instead of a device-side `frida-server` and requires `--attach`, the second sets the port up with `adb forward` and removes it afterwards. This is the no-root transport, and it is now a first-class command instead of ad-hoc host tooling.

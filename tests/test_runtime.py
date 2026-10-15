@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_core import EvidenceStore, ForgeError
 import forge_runtime
+import forge_android
 
 
 def result(stdout=b"", code=0, stderr=b"", expired=False):
@@ -156,6 +157,164 @@ class RuntimeActionTests(unittest.TestCase):
         self.assertEqual(len(facts["code_paths"]), 2)
         self.assertFalse(facts["truncated"])
 
+    def test_pull_package_copies_the_installed_base_and_splits_with_hashes(self):
+        (self.root / "installed").mkdir()
+        payloads = {"base.apk": b"base-apk-fixture", "split_config.en.apk": b"split-apk-fixture"}
+        paths = ("/data/app/pkg/base.apk", "/data/app/pkg/split_config.en.apk")
+
+        def pulling(command, timeout):
+            if command[3:] == ["shell", "pm", "path", "com.example.app"]:
+                return result("".join(f"package:{path}\n" for path in paths))
+            if command[3:6] == ["shell", "dumpsys", "package"]:
+                return result("versionCode=280 versionName=2.6.1 primaryCpuAbi=arm64-v8a splitNames=[config.en]")
+            if "pull" in command:
+                Path(command[-1]).write_bytes(payloads[Path(command[-2]).name])
+                return result("1 file pulled")
+            return result(code=1, stderr="unexpected command")
+
+        manifests = [{"package": "com.example.app", "split": None},
+                     {"package": "com.example.app", "split": "config.en"}]
+        with patch.object(forge_android, "inspect_apk", side_effect=manifests):
+            record = self.invoke(pulling, "adb", "pull-package", "--serial", self.serial,
+                                 "--package", "com.example.app", "--path", "installed/grok")
+        data = record["data"]
+        output = self.root / "installed" / "grok"
+        self.assertTrue(data["success"])
+        self.assertEqual(data["package_facts"]["version_name"], "2.6.1")
+        self.assertEqual([row["filename"] for row in data["files"]], list(payloads))
+        self.assertEqual((output / "base.apk").read_bytes(), payloads["base.apk"])
+        self.assertEqual(data["files"][1]["sha256"], hashlib.sha256(payloads["split_config.en.apk"]).hexdigest())
+        self.assertEqual(data["bytes_pulled"], sum(map(len, payloads.values())))
+
+    def test_pull_package_failure_publishes_no_partial_directory(self):
+        (self.root / "installed").mkdir()
+        calls = 0
+
+        def failing(command, timeout):
+            nonlocal calls
+            if command[3:] == ["shell", "pm", "path", "com.example.app"]:
+                return result("package:/data/app/pkg/base.apk\npackage:/data/app/pkg/split.apk\n")
+            if command[3:6] == ["shell", "dumpsys", "package"]:
+                return result("versionName=1 versionCode=1")
+            if "pull" in command:
+                calls += 1
+                if calls == 1:
+                    Path(command[-1]).write_bytes(b"base")
+                    return result("1 file pulled")
+                return result(code=1, stderr="permission denied")
+            return result(code=1, stderr="unexpected command")
+
+        with self.assertRaisesRegex(ForgeError, "ADB pull failed for installed split"):
+            self.invoke(failing, "adb", "pull-package", "--serial", self.serial,
+                        "--package", "com.example.app", "--path", "installed/grok")
+        self.assertFalse((self.root / "installed" / "grok").exists())
+        self.assertFalse(self.last_record("pull-package")["success"])
+
+    def test_pull_package_rejects_manifest_package_mismatch_without_publishing(self):
+        (self.root / "installed").mkdir()
+
+        def pulling(command, timeout):
+            if command[3:] == ["shell", "pm", "path", "com.example.app"]:
+                return result("package:/data/app/pkg/base.apk\n")
+            if command[3:6] == ["shell", "dumpsys", "package"]:
+                return result("versionName=1 versionCode=1")
+            if "pull" in command:
+                Path(command[-1]).write_bytes(b"fixture-apk")
+                return result("1 file pulled")
+            return result()
+
+        with patch.object(forge_android, "inspect_apk", return_value={"package": "com.other.app"}):
+            with self.assertRaisesRegex(ForgeError, "declares package com.other.app"):
+                self.invoke(pulling, "adb", "pull-package", "--serial", self.serial,
+                            "--package", "com.example.app", "--path", "installed/example")
+        self.assertFalse((self.root / "installed" / "example").exists())
+        self.assertFalse(self.last_record("pull-package")["success"])
+
+    def test_observe_captures_only_target_pids_in_a_bounded_time_window(self):
+        dates = iter(("1700000000\n", "1700000010\n"))
+        log = ("1700000001.100  123  456 I Grok: observed request host api.example.test\n"
+               "1700000001.200  999  999 I Other: unrelated\n"
+               "1700000011.100  123  456 I Grok: after session\n")
+
+        def observing(command, timeout):
+            if command[3:7] == ["shell", "ps", "-A", "-o"]:
+                return result("PID NAME\n123 com.example.app\n")
+            if command[3:6] == ["shell", "date", "+%s"]:
+                return result(next(dates))
+            if "logcat" in command:
+                return result(log)
+            return result(code=1, stderr="unexpected command")
+
+        with patch.object(forge_runtime.time, "sleep") as sleep:
+            record = self.invoke(observing, "adb", "observe", "--serial", self.serial,
+                                 "--package", "com.example.app", "--seconds", "10", "--lines", "20")
+        data = record["data"]
+        self.assertEqual(sleep.call_args.args, (10,))
+        self.assertEqual(data["device_epoch_start"], 1700000000)
+        self.assertEqual(data["device_epoch_end"], 1700000010)
+        self.assertEqual(data["logcat_line_count"], 1)
+        self.assertEqual(data["logcat_line_cap_per_pid"], 20)
+        self.assertIn("api.example.test", data["logcat_lines"][0])
+        self.assertTrue(data["success"])
+        self.assertIn("does not capture or decrypt HTTP traffic", data["scope"])
+
+    def test_observe_requires_the_app_to_be_running(self):
+        def no_process(command, timeout):
+            if command[3:7] == ["shell", "ps", "-A", "-o"]:
+                return result("PID NAME\n")
+            return result("1700000000\n")
+
+        with patch.object(forge_runtime, "_run", side_effect=self.run_with(no_process)):
+            args = self.parser.parse_args(["adb", "observe", "--serial", self.serial,
+                                           "--package", "com.example.app", "--seconds", "2"])
+            with self.assertRaisesRegex(ForgeError, "Target app is not running"):
+                args.handler(args, self.store)
+        self.assertFalse(self.last_record("observe")["success"])
+
+    def test_observe_ui_snapshots_are_opt_in_and_remote_files_are_removed(self):
+        dates = iter(("1700000000\n", "1700000002\n"))
+        commands = []
+
+        def observing(command, timeout):
+            commands.append(command)
+            if command[3:7] == ["shell", "ps", "-A", "-o"]:
+                return result("PID NAME\n123 com.example.app\n")
+            if command[3:6] == ["shell", "date", "+%s"]:
+                return result(next(dates))
+            if "uiautomator" in command:
+                return result("UI hierarchy dumped")
+            if command[3:5] == ["exec-out", "cat"]:
+                return result('<hierarchy text="Settings"/>')
+            if "logcat" in command:
+                return result("1700000001.000 123 456 I App: tap\n")
+            return result()
+
+        with patch.object(forge_runtime.time, "sleep"):
+            record = self.invoke(observing, "adb", "observe", "--serial", self.serial,
+                                 "--package", "com.example.app", "--seconds", "2", "--ui-snapshots")
+        ui = record["data"]["ui_snapshots"]
+        self.assertEqual(ui["before"]["xml"], '<hierarchy text="Settings"/>')
+        self.assertEqual(ui["after"]["xml"], '<hierarchy text="Settings"/>')
+        self.assertEqual(sum(1 for command in commands if command[3:5] == ["shell", "rm"]), 2)
+
+
+    def test_observe_logcat_failure_is_not_reported_as_a_successful_session(self):
+        dates = iter(("1700000000\n", "1700000002\n"))
+
+        def failing(command, timeout):
+            if command[3:7] == ["shell", "ps", "-A", "-o"]:
+                return result("PID NAME\n123 com.example.app\n")
+            if command[3:6] == ["shell", "date", "+%s"]:
+                return result(next(dates))
+            if "logcat" in command:
+                return result(code=1, stderr="logcat permission denied")
+            return result()
+
+        with patch.object(forge_runtime.time, "sleep"):
+            with self.assertRaisesRegex(ForgeError, "logcat observation failed"):
+                self.invoke(failing, "adb", "observe", "--serial", self.serial,
+                            "--package", "com.example.app", "--seconds", "2")
+        self.assertFalse(self.last_record("observe")["success"])
     def test_ui_tree_retries_after_a_non_idle_window(self):
         attempts = []
 

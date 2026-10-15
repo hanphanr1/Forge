@@ -1,4 +1,4 @@
-# Android preflight and explicit split installation
+# Android preflight, installed APK pull, observation and split installation
 
 FORGE uses the configured ADB executable: `FORGE_ADB`, the bundled platform-tools directory, or PATH, in that order. An invalid explicit override does not fall back. These commands do not download an SDK, alter device security, root a device, or configure Frida.
 
@@ -33,6 +33,37 @@ forge adb push --serial OWNED_DEVICE_SERIAL --path ./hook.js --remote /data/loca
 `adb pull` copies exactly one absolute device file into the project. The destination must be a new project-local path: existing files, traversal, and symlinked parent directories are rejected, and directories on the device are not copied. Retained bytes are capped by `--max-bytes` (default 256 MiB); an over-cap or failed pull leaves no partial file. `adb push` copies one regular project file to an absolute device path. Both actions are for artifacts you own or are authorized to handle.
 
 `adb ui-tree` wakes the screen and retries once. `uiautomator` still needs a quiescent foreground window, so an animated or locked screen can fail with an explicit `could not get idle state` error; unlock the device or stop animations and retry.
+
+
+## Android Lab for an installed app
+
+Start from the build on the device, not a guessed APK download. `adb pull-package` reads every path
+returned by `pm path`, copies the base and splits to a new project directory, hashes each file, and
+records package/version/split metadata. The pull is read-only. A hash identifies the bytes copied
+from the device; it does not authenticate the publisher.
+
+```console
+mkdir installed
+forge adb pull-package --serial OWNED_DEVICE_SERIAL --package com.example.app --path installed/example
+forge adb launch --serial OWNED_DEVICE_SERIAL --package com.example.app --component com.example.app/.MainActivity
+forge adb observe --serial OWNED_DEVICE_SERIAL --package com.example.app --seconds 90 --lines 3000 --ui-snapshots
+```
+
+Open the app before `adb observe`, or launch it first with the manifest component shown above.
+While the command waits, perform one action in the app. FORGE does not clear logcat or restart the
+app. It samples the app's process IDs before and after the window, reads the device log buffer at
+the end, and keeps rows for those PIDs whose epoch timestamps fall inside the window. `--lines`
+limits recent rows per session and is divided across the sampled PIDs; older rows may have rolled
+out of the device buffer or fallen past that cap. A process that starts and exits between the two
+PID samples can be missed. `--ui-snapshots` is opt-in; UI trees can contain private screen text and
+stay in the local evidence store. Logcat redaction is best-effort.
+
+`adb observe` records process logs, not HTTP traffic. To learn API requests, capture traffic with an
+authorized tool, export a HAR to the project, and run `har-import`. A capture tool running on the
+same host can instead POST the HAR to the loopback-only `capture-ingest` listener. Then use
+`api-shape` and `protocol-map` to inspect captured names and citations. ADB observation does not
+decrypt TLS, install a trust certificate, bypass certificate pinning, or prove that an endpoint
+belongs to the app. Unmatched or unobserved fields remain unknown.
 
 ## Install a selected APK set
 

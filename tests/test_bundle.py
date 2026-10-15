@@ -56,6 +56,30 @@ class BundleTests(unittest.TestCase):
         self.assertFalse(result["manifest"]["raw_materials_included"])
         self.assertTrue(result["manifest"]["closure_complete"])
 
+    def test_android_lab_metadata_is_exportable_but_logs_ui_and_local_paths_are_not(self):
+        pulled = self.store.add("runtime", {
+            "tool": "adb", "action": "pull-package", "success": True, "package": "com.example.app",
+            "bytes_pulled": 10, "output_dir": "pulled/app",
+            "package_facts": {"version_name": "1.2.3", "version_code": "12"},
+            "files": [{"filename": "base.apk", "path": "pulled/app/base.apk", "sha256": "a" * 64, "size": 10,
+                       "manifest": {"package": "com.example.app", "split": None}}]})
+        observed = self.store.add("runtime", {
+            "tool": "adb", "action": "observe", "success": True, "package": "com.example.app",
+            "duration_seconds": 60, "time_window_filtered": True, "logcat_line_count": 1,
+            "logcat_lines": ["Authorization: Bearer private-session-token"],
+            "ui_snapshots": {"before": {"xml": "private screen content"}}})
+        self.export([pulled["id"], observed["id"]])
+        members = self.read_members()
+        packed = b"\n".join(members.values()).decode()
+        self.assertIn("pull-package", packed)
+        self.assertIn("observe", packed)
+        self.assertIn("com.example.app", packed)
+        self.assertIn("version_name", packed)
+        self.assertIn("a" * 64, packed)
+        self.assertNotIn("pulled/app/base.apk", packed)
+        self.assertNotIn("private-session-token", packed)
+        self.assertNotIn("private screen content", packed)
+
     def test_transitive_controls_are_cited_and_archive_content_hashes_match(self):
         positive = self.store.add("target_run", {"control": "positive", "bucket": "FREE", "success": True, "runtime_before": {"sha256": "a" * 64, "size": 123}})
         negative = self.store.add("target_run", {"control": "negative", "bucket": "FAIL", "success": True})

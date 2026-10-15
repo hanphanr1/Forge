@@ -713,8 +713,6 @@ def register(subparsers):
     parser.add_argument("paths", nargs="*", help="Ordered APK paths")
     parser.add_argument("--archive", help="Explicit APKS/XAPK archive")
     parser.add_argument("--member", action="append", default=[], help="Exact APK archive member; repeat in order")
-    parser.add_argument("--installer", help="Declare the recorded install source with adb -i, for example "
-                                            "com.android.vending")
     parser.add_argument("--validate-selection", action="store_true",
                         help="Also check the set as one installable split selection")
     parser.set_defaults(handler=apk_info)
@@ -727,5 +725,7 @@ def register(subparsers):
     source.add_argument("--archive", help="Explicit APKS/XAPK archive")
     parser.add_argument("--member", action="append", default=[], help="Exact APK archive member; repeat in install order")
     parser.add_argument("--serial")
+    parser.add_argument("--installer", help="Declare the recorded install source with adb -i, for example "
+                                            "com.android.vending")
     parser.add_argument("--timeout", type=float, default=120)
     parser.set_defaults(handler=adb_install_splits)

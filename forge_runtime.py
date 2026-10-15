@@ -5,14 +5,20 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 from forge_core import ForgeError, scrub_text
 from forge_toolchain import TOOLS, executable, find_tool
 import forge_tasks
+
+_PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
+_MAX_PACKAGE_APKS = 128
+_MAX_OBSERVE_PIDS = 16
 
 
 def _input_path(store, value):
@@ -80,6 +86,64 @@ def _new_destination(store, value):
     return destination
 
 
+def _new_directory(store, value):
+    if not value:
+        raise ForgeError("Provide --path for the project-local APK directory")
+    destination = _input_path(store, value)
+    if not destination.is_relative_to(store.root.resolve()):
+        raise ForgeError("Directory must stay inside the project")
+    if destination.exists():
+        raise ForgeError("Directory already exists; choose a new project-local path")
+    for part in (*reversed(destination.parent.parents), destination.parent):
+        if part.is_symlink():
+            raise ForgeError(f"Symlinked destination directories are not allowed: {part}")
+    if not destination.parent.is_dir():
+        raise ForgeError("Destination parent directory does not exist")
+    return destination
+
+
+def _package_processes(adb, serial, package, timeout):
+    code, stdout, stderr, expired = _run(
+        [adb, "-s", serial, "shell", "ps", "-A", "-o", "PID,NAME"], timeout)
+    if code != 0 or expired:
+        return [], {"returncode": code, "timed_out": expired,
+                    "stderr": scrub_text(stderr.decode("utf-8", "replace"))}
+    processes = []
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        fields = line.split(None, 1)
+        if len(fields) == 2 and fields[0].isdigit():
+            name = fields[1].strip()
+            if name == package or name.startswith(package + ":"):
+                processes.append({"pid": int(fields[0]), "name": name})
+    processes.sort(key=lambda item: (item["name"] != package, item["pid"]))
+    omitted = max(0, len(processes) - _MAX_OBSERVE_PIDS)
+    return processes[:_MAX_OBSERVE_PIDS], {"returncode": code, "timed_out": False, "stderr": "",
+                                           "omitted": omitted}
+
+
+def _filter_android_logcat(output, pids, start_epoch, end_epoch, max_bytes):
+    selected = []
+    omitted_lines = 0
+    retained = 0
+    for line in output.decode("utf-8", "replace").splitlines():
+        match = re.match(r"\s*(\d+(?:\.\d+)?)\s+(\d+)\s+\d+\s+[VDIWEF]\s+", line)
+        if not match or int(match.group(2)) not in pids:
+            continue
+        timestamp = float(match.group(1))
+        if start_epoch is not None and timestamp < start_epoch - 1:
+            continue
+        if end_epoch is not None and timestamp > end_epoch + 1:
+            continue
+        clean = scrub_text(line)
+        size = len(clean.encode("utf-8")) + 1
+        if retained + size > max_bytes:
+            omitted_lines += 1
+            continue
+        selected.append(clean)
+        retained += size
+    return selected, omitted_lines
+
+
 def _existing_source(store, value):
     if not value:
         raise ForgeError("Provide --path to an existing project-local file")
@@ -93,6 +157,199 @@ def _existing_source(store, value):
 
 def _relative(store, path):
     return path.relative_to(store.root.resolve()).as_posix()
+
+
+def _package_facts(text):
+    facts = {}
+    for key, pattern in (
+            ("version_name", r"\bversionName=(\S+)"),
+            ("version_code", r"\bversionCode=(\d+)"),
+            ("primary_cpu_abi", r"\bprimaryCpuAbi=(\S+)"),
+            ("split_names", r"\bsplitNames=\[(.*?)\]")):
+        match = re.search(pattern, text)
+        facts[key] = ([part.strip() for part in match.group(1).split(",") if part.strip()]
+                      if key == "split_names" and match else
+                      match.group(1) if match else None)
+    return facts
+
+
+def _pull_installed_package(args, store, adb, serial):
+    package = args.package
+    if not package or not _PACKAGE_NAME.fullmatch(package):
+        raise ForgeError("Provide a valid --package")
+    if not 1 <= args.max_bytes <= 1024 * 1024 * 1024:
+        raise ForgeError("--max-bytes must be between 1 and 1073741824 for a package pull")
+    if not 1 <= args.max_output <= 16 * 1024 * 1024:
+        raise ForgeError("--max-output must be between 1 and 16777216 bytes for package metadata")
+    output_dir = _new_directory(store, args.path)
+    path_result = _run([adb, "-s", serial, "shell", "pm", "path", package], args.timeout)
+    detail_result = _run([adb, "-s", serial, "shell", "dumpsys", "package", package], args.timeout)
+    if path_result[0] != 0 or path_result[3] or detail_result[0] != 0 or detail_result[3]:
+        failure = store.add("runtime", {"tool": "adb", "action": "pull-package", "package": package,
+                                        "serial": serial, "success": False, "code_paths": [],
+                                        "timed_out": path_result[3] or detail_result[3],
+                                        "stderr": scrub_text((path_result[2] + detail_result[2]).decode("utf-8", "replace")),
+                                        "scope": "Read-only copy of the installed package; no install or app modification"})
+        raise ForgeError(f"ADB could not inspect installed package; evidence {failure['id']}")
+    remote_paths = []
+    for line in path_result[1].decode("utf-8", "replace").splitlines():
+        if line.startswith("package:"):
+            remote_paths.append(_remote_path(line.split("package:", 1)[1].strip()))
+    if not 1 <= len(remote_paths) <= _MAX_PACKAGE_APKS:
+        failure = store.add("runtime", {"tool": "adb", "action": "pull-package", "package": package,
+                                        "serial": serial, "success": False, "code_paths": remote_paths,
+                                        "error": "Package manager returned no APK paths or too many splits",
+                                        "scope": "Read-only copy of the installed package"})
+        raise ForgeError(f"ADB returned no usable APK paths; evidence {failure['id']}")
+    names = [remote.rsplit("/", 1)[-1] for remote in remote_paths]
+    if any(not re.fullmatch(r"[A-Za-z0-9._-]+\.apk", name, re.IGNORECASE) for name in names):
+        raise ForgeError("Package manager returned an unsafe APK filename")
+    if len({name.casefold() for name in names}) != len(names):
+        raise ForgeError("Package manager returned duplicate APK filenames")
+    detail = detail_result[1][:args.max_output].decode("utf-8", "replace")
+    package_facts = _package_facts(detail)
+    staging = Path(tempfile.mkdtemp(prefix="forge-pull-package-", dir=store.directory))
+    files, total = [], 0
+    try:
+        for remote, name in zip(remote_paths, names):
+            local = staging / name
+            code, stdout, stderr, expired = _run([adb, "-s", serial, "pull", remote, str(local)], args.timeout)
+            if code != 0 or expired or not local.is_file():
+                raise ForgeError(f"ADB pull failed for installed split {name}: "
+                                 + scrub_text(stderr.decode("utf-8", "replace")))
+            size = local.stat().st_size
+            total += size
+            if size <= 0 or total > args.max_bytes:
+                raise ForgeError(f"Pulled package exceeds --max-bytes ({args.max_bytes}) or contains an empty APK")
+            digest = hashlib.sha256()
+            with local.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            manifest = None
+            manifest_error = None
+            try:
+                import forge_android
+                manifest = forge_android.inspect_apk(local)
+            except (ForgeError, OSError) as error:
+                manifest_error = str(error)
+            if manifest is not None and manifest["package"] != package:
+                raise ForgeError(f"Pulled split {name} declares package {manifest['package']}, expected {package}")
+            files.append({"remote": remote, "filename": name, "sha256": digest.hexdigest(),
+                          "size": size, "manifest": manifest, "manifest_error": manifest_error})
+        if output_dir.exists():
+            raise ForgeError("Output directory appeared during the pull; no files were published")
+        shutil.move(str(staging), str(output_dir))
+        staging = None
+    except (ForgeError, OSError, shutil.Error, RuntimeError) as error:
+        failure = store.add("runtime", {"tool": "adb", "action": "pull-package", "package": package,
+                                        "serial": serial, "success": False, "code_paths": remote_paths,
+                                        "files": files, "bytes_pulled": total, "error": str(error),
+                                        "scope": "Read-only copy of the installed package; no install or app modification"})
+        raise ForgeError(f"{error}; rejection evidence {failure['id']}") from error
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+    for item in files:
+        item["path"] = _relative(store, output_dir / item["filename"])
+    return store.add("runtime", {"tool": "adb", "action": "pull-package", "package": package,
+                                 "serial": serial, "success": True, "code_paths": remote_paths,
+                                 "package_facts": package_facts, "files": files, "bytes_pulled": total,
+                                 "output_dir": _relative(store, output_dir),
+                                 "scope": "Read-only copy of the installed package; pulled bytes are locally hashed, "
+                                          "not publisher-authenticated. Review before sharing."})
+
+
+def _ui_tree_snapshot(adb, serial, timeout):
+    remote = f"/data/local/tmp/forge-android-lab-{uuid.uuid4().hex}.xml"
+    try:
+        dump = _run([adb, "-s", serial, "shell", "uiautomator", "dump", remote], timeout)
+        if dump[0] != 0 or dump[3] or b"ERROR" in dump[1] + dump[2]:
+            return {"error": scrub_text((dump[1] + dump[2]).decode("utf-8", "replace"))[:1024]}
+        content = _run([adb, "-s", serial, "exec-out", "cat", remote], timeout)
+        if content[0] != 0 or content[3]:
+            return {"error": scrub_text(content[2].decode("utf-8", "replace"))[:1024]}
+        return {"xml": scrub_text(content[1].decode("utf-8", "replace"))}
+    finally:
+        _run([adb, "-s", serial, "shell", "rm", "-f", remote], min(timeout, 15))
+
+
+def _android_logcat_observation(args, store, adb, serial):
+    package = args.package
+    if not package or not _PACKAGE_NAME.fullmatch(package):
+        raise ForgeError("Provide a valid --package")
+    if not 1 <= args.seconds <= 3600:
+        raise ForgeError("--seconds must be between 1 and 3600")
+    if not 1 <= args.lines <= 10000:
+        raise ForgeError("--lines must be between 1 and 10000")
+    if not 1024 <= args.max_output <= 4 * 1024 * 1024:
+        raise ForgeError("--max-output must be between 1024 and 4194304 bytes")
+    start_processes, start_ps = _package_processes(adb, serial, package, args.timeout)
+    if not start_processes:
+        detail = ("ADB could not list processes" if start_ps.get("returncode") != 0 or start_ps.get("timed_out")
+                  else "Target app is not running; launch it, then start adb observe")
+        failure = store.add("runtime", {"tool": "adb", "action": "observe", "package": package, "serial": serial,
+                                        "success": False, "processes_before": [], "processes_after": [],
+                                        "error": detail, "ps_call": start_ps})
+        raise ForgeError(f"{detail}; evidence {failure['id']}")
+    ui = {"before": _ui_tree_snapshot(adb, serial, args.timeout)} if args.ui_snapshots else None
+    start_clock = _run([adb, "-s", serial, "shell", "date", "+%s"], args.timeout)
+    start_epoch = None
+    if start_clock[0] == 0 and not start_clock[3]:
+        found = re.fullmatch(r"\s*(\d+)\s*", start_clock[1].decode("utf-8", "replace"))
+        start_epoch = int(found.group(1)) if found else None
+    started_at = time.time()
+    time.sleep(args.seconds)
+    duration = time.time() - started_at
+    end_clock = _run([adb, "-s", serial, "shell", "date", "+%s"], args.timeout)
+    end_epoch = None
+    if end_clock[0] == 0 and not end_clock[3]:
+        found = re.fullmatch(r"\s*(\d+)\s*", end_clock[1].decode("utf-8", "replace"))
+        end_epoch = int(found.group(1)) if found else None
+    end_processes, end_ps = _package_processes(adb, serial, package, args.timeout)
+    processes = {item["pid"]: item for item in start_processes + end_processes}
+    all_process_ids = list(processes)
+    process_ids = all_process_ids[:_MAX_OBSERVE_PIDS]
+    per_pid_lines = max(1, args.lines // max(1, len(process_ids)))
+    log_lines, omitted, log_calls = [], 0, []
+    retained_bytes = 0
+    logcat_succeeded = False
+    for pid in process_ids:
+        result = _run([adb, "-s", serial, "logcat", "-d", "-v", "epoch", "--pid", str(pid),
+                       "-t", str(per_pid_lines)], args.timeout)
+        log_calls.append({"pid": pid, "returncode": result[0], "timed_out": result[3],
+                          "stderr": scrub_text(result[2].decode("utf-8", "replace"))})
+        if result[0] != 0 or result[3]:
+            continue
+        logcat_succeeded = True
+        selected, omitted_lines = _filter_android_logcat(
+            result[1], {pid}, start_epoch, end_epoch, max(0, args.max_output - retained_bytes))
+        log_lines.extend(selected)
+        retained_bytes += sum(len(line.encode("utf-8")) + 1 for line in selected)
+        omitted += omitted_lines
+    if len(log_lines) > args.lines:
+        omitted += len(log_lines) - args.lines
+        log_lines = sorted(log_lines, key=lambda line: float(line.split(None, 1)[0]))[-args.lines:]
+    if ui is not None:
+        ui["after"] = _ui_tree_snapshot(adb, serial, args.timeout)
+    record = store.add("runtime", {"tool": "adb", "action": "observe", "package": package, "serial": serial,
+                                  "success": logcat_succeeded, "duration_seconds": round(duration, 3),
+                                  "device_epoch_start": start_epoch, "device_epoch_end": end_epoch,
+                                  "time_window_filtered": start_epoch is not None and end_epoch is not None,
+                                  "processes_before": start_processes, "processes_after": end_processes,
+                                  "process_rows_omitted_before": start_ps.get("omitted", 0),
+                                  "process_rows_omitted_after": end_ps.get("omitted", 0),
+                                  "session_pids_omitted": max(0, len(all_process_ids) - len(process_ids)),
+                                  "pid_list_calls": [start_ps, end_ps], "logcat_calls": log_calls,
+                                  "logcat_lines": log_lines, "logcat_line_count": len(log_lines),
+                                  "logcat_line_cap_per_pid": per_pid_lines,
+                                  "logcat_omitted_lines": omitted, "ui_snapshots": ui,
+                                  "scope": "Process-scoped logcat only; per-PID line caps can omit earlier rows and "
+                                          "redaction is best-effort. UI snapshots are opt-in and may contain private "
+                                          "screen text. This does not capture or decrypt HTTP traffic, bypass pinning, "
+                                          "or modify the app."})
+    if not logcat_succeeded:
+        raise ForgeError(f"ADB logcat observation failed; evidence {record['id']}")
+    return record
 
 
 def adb_action(args, store):
@@ -111,6 +368,11 @@ def adb_action(args, store):
         serial = online[0]
     elif serial not in online:
         raise ForgeError(f"Device {serial} is absent, unauthorized or offline")
+
+    if args.action == "pull-package":
+        return _pull_installed_package(args, store, adb, serial)
+    if args.action == "observe":
+        return _android_logcat_observation(args, store, adb, serial)
     command = [adb, "-s", serial]
     blob = None
     remote, destination, digest, size = None, None, None, None
@@ -394,7 +656,7 @@ def register(subparsers):
     parser.set_defaults(handler=doctor)
     parser = subparsers.add_parser("adb", help="Run device actions and save local runtime evidence")
     parser.add_argument("action", choices=["devices", "install", "launch", "stop", "logcat", "screenshot", "ui-tree",
-                                           "pull", "push", "packages", "package"])
+                                           "pull", "push", "pull-package", "observe", "packages", "package"])
     parser.add_argument("--serial")
     parser.add_argument("--path")
     parser.add_argument("--package")
@@ -406,8 +668,13 @@ def register(subparsers):
     parser.add_argument("--third-party", action="store_true", help="Restrict packages to third-party apps")
     parser.add_argument("--system", action="store_true", help="Restrict packages to system apps")
     parser.add_argument("--lines", type=int, default=200)
-    parser.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024, help="Byte cap for a pulled file")
-    parser.add_argument("--max-output", type=int, default=4 * 1024 * 1024, help="Retained byte cap for package details")
+    parser.add_argument("--seconds", type=int, default=60, help="Manual Android observation window in seconds")
+    parser.add_argument("--ui-snapshots", action="store_true",
+                        help="Capture before/after UI trees; the tree may contain private screen text")
+    parser.add_argument("--max-bytes", type=int, default=256 * 1024 * 1024,
+                        help="Byte cap per pulled file or aggregate installed package")
+    parser.add_argument("--max-output", type=int, default=4 * 1024 * 1024,
+                        help="Retained byte cap for package details and observation logs")
     parser.add_argument("--timeout", type=float, default=60)
     parser.set_defaults(handler=adb_action)
     parser = subparsers.add_parser("frida", help="Run an explicit Java/native hook script on a configured device")
