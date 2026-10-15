@@ -200,6 +200,20 @@ class AndroidCallerMapTests(unittest.TestCase):
             with self.assertRaisesRegex(ForgeError, "must be an integer from 1 to"):
                 self.run_map(*extra)
 
+
+    def test_path_filter_scopes_the_walk_and_the_owner_tree(self):
+        data = self.run_map("--path-filter", "com/example/net")
+        self.assertEqual(data["path_filter"], ["com/example/net"])
+        self.assertEqual({candidate["class_name"] for candidate in data["candidates"]}, {"com.example.net.Transport"})
+        self.assertLess(data["files_enumerated"], 6)
+        scoped = self.run_map("--path-filter", "com/example/app/Client.java")
+        self.assertEqual({candidate["class_name"] for candidate in scoped["candidates"]}, {"com.example.app.Client"})
+        dotted = self.run_map("--path-filter", "example.other")
+        self.assertEqual({candidate["class_name"] for candidate in dotted["candidates"]}, {"com.example.other.Detached"})
+        for value in ("", "   ", "/" * 600):
+            with self.assertRaisesRegex(ForgeError, "path/class substring"):
+                self.run_map("--path-filter", value)
+
     def test_record_schema_and_scope_make_no_resolution_claim(self):
         data = self.run_map()
         self.assertEqual(data["schema"], "forge.android-caller-map/v1")

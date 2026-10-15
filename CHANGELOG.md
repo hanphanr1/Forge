@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.0 - 2026-10-15
+
+- `pcapdroid-preflight` now observes the PCAPdroid MITM addon (`com.pcapdroid.mitm`) as its own scoped fact (installed, version), and `pcapdroid-capture --tls-decryption` refuses with `mitm-addon-absent` before any Intent is sent when the addon is missing. On hardware this turned a silent 60-second consent timeout into one actionable message naming the official addon repository; a missing CA or pinning still only limits decryption, never the capture.
+- `android-caller-map --path-filter` (repeatable) scopes the source walk to a path/class substring, recorded in the evidence, so chasing one class no longer tokenizes a 23,000-file tree.
+- `pcapdroid-capture --continue-on-error` keeps later windows running after a window fails; the session record still reports `success: false` with every failure listed. The default remains stop-at-first-failure, and a lost `break` that made sessions silently continue past a failed window was restored.
+
 ## 0.15.0 - 2026-10-15
 
 - `pcapdroid-capture --tls-decryption` (opt-in) requests PCAPdroid's own decryption mode scoped to the target app via `decryption_rules` with `block_quic to_decrypt`. FORGE installs no CA, adds no trust anchor and edits nothing: the request, operator approval and scope are recorded, and an app that distrusts user CAs or pins certificates simply stays encrypted.

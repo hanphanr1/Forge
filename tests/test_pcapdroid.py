@@ -52,8 +52,10 @@ class Device:
     def __init__(self, *, installed=True, target_installed=True, capture_running=False, consent=True,
                  stop_works=True, header_valid=True, payload=b"", truncate_service=False, start_error=False,
                  device_size=None, create_file=True, defer_data=False, truncate_package=False, am_echo="",
-                 devices=None, adb="configured-adb", launch_error=False, force_stop_error=False):
+                 devices=None, adb="configured-adb", launch_error=False, force_stop_error=False,
+                 mitm_installed=False):
         self.adb = adb
+        self.mitm_installed = mitm_installed
         self.installed = installed
         self.target_installed = target_installed
         self.capture_running = capture_running
@@ -154,6 +156,9 @@ class Device:
     def package_detail(self, package):
         if self.truncate_package:
             return call_result(f"Package [{package}] (8f0f2c4):\n  userId=10234\n", omitted_out=8192)
+        if package == pcapdroid.MITM_PACKAGE and self.mitm_installed:
+            return call_result(f"Package [{package}] (mitm1):\n  userId=10100\n  versionName=2.4\n"
+                               f"  versionCode=26 minSdk=24 targetSdk=34\n")
         if package == pcapdroid.CAPTURE_PACKAGE and self.installed:
             return call_result(f"Package [{pcapdroid.CAPTURE_PACKAGE}] (8f0f2c4):\n"
                                f"  userId=10234\n  versionName=2.0.2\n  versionCode=95 minSdk=21 targetSdk=34\n")
@@ -780,6 +785,32 @@ class CaptureFailureTests(BaseCase):
 class DecryptionTests(BaseCase):
     RULES = json.dumps([{"type": "APP", "value": PACKAGE}], separators=(",", ":"))
 
+    def test_preflight_reports_the_addon_as_its_own_scoped_fact(self):
+        record, _ = self.preflight(Device())
+        addon = record["data"]["mitm_addon"]
+        self.assertFalse(addon["installed"])
+        self.assertEqual(addon["package"], pcapdroid.MITM_PACKAGE)
+        self.assertIsNone(addon["version_name"])
+        record, _ = self.preflight(Device(mitm_installed=True))
+        addon = record["data"]["mitm_addon"]
+        self.assertTrue(addon["installed"])
+        self.assertEqual((addon["version_name"], addon["version_code"]), ("2.4", 26))
+
+    def test_decryption_refuses_before_dispatch_when_the_addon_is_absent(self):
+        device = Device(payload=b"\x05" * 8)
+        with self.assertRaisesRegex(ForgeError, "mitm-addon-absent"):
+            self.capture(device, tls_decryption=True)
+        self.assertEqual(device.am_commands(), [], "no capture Intent may be sent without the addon")
+        self.assertFalse((self.root / "captures" / "run.pcap").exists())
+        data = self.rejection()["data"]
+        self.assertFalse(data["dispatch"])
+        self.assertIn(pcapdroid.MITM_REPOSITORY, data["error"])
+
+    def test_decryption_proceeds_when_the_addon_is_installed(self):
+        record, _ = self.capture(Device(mitm_installed=True, payload=b"\x06" * 8), tls_decryption=True)
+        self.assertTrue(record["data"]["success"])
+        self.assertTrue(record["data"]["decryption_requested"])
+
     def test_decryption_stays_off_unless_the_operator_opts_in(self):
         device = Device(payload=b"\x05" * 16)
         record, _ = self.capture(device)
@@ -801,7 +832,7 @@ class DecryptionTests(BaseCase):
         self.assertNotIn("decryption_rules", session["settings"])
 
     def test_tls_decryption_opt_in_sends_settings_and_records_consent(self):
-        device = Device(payload=b"\x06" * 16)
+        device = Device(mitm_installed=True, payload=b"\x06" * 16)
         record, _ = self.capture(device, tls_decryption=True)
         data = record["data"]
         settings = data["settings"]
@@ -823,7 +854,7 @@ class DecryptionTests(BaseCase):
         self.assertTrue(data["settings"]["full_payload"])
 
     def test_decryption_is_independent_of_the_api_key(self):
-        device = Device(payload=b"\x07" * 16)
+        device = Device(mitm_installed=True, payload=b"\x07" * 16)
         with patch.dict(os.environ, {"FORGE_TEST_API_KEY": "decryption-key-123"}):
             record, stderr = self.capture(device, tls_decryption=True, api_key_env="FORGE_TEST_API_KEY")
         data = record["data"]
@@ -836,7 +867,7 @@ class DecryptionTests(BaseCase):
         self.assertNotIn("decryption-key-123", stderr)
 
     def test_decryption_consent_survives_a_failed_window(self):
-        device = Device(stop_works=False)
+        device = Device(mitm_installed=True, stop_works=False)
         with self.assertRaisesRegex(ForgeError, "still observed as running"):
             self.capture(device, tls_decryption=True)
         data = self.rejection()["data"]
@@ -989,6 +1020,33 @@ class SessionTests(BaseCase):
         self.assertEqual(rejection["retrieval"], {"pulled": False, "published": False})
         self.assertEqual(rejection["stop"]["state"], "stopped")
         self.assertEqual(rejection["limits"], self.records("capture-session")[0]["data"]["limits"])
+
+    def test_continue_on_error_runs_later_windows_and_reports_success_false(self):
+        device = Device(payload=b"\x13" * 32)
+        self.session_directory()
+        original_pull = device.pull
+        pulls = []
+
+        def fail_second_pull(remote, local):
+            pulls.append(remote)
+            if len(pulls) == 2:
+                return call_result("", code=1, stderr="adb: error: failed to stat remote object\n")
+            return original_pull(remote, local)
+
+        device.pull = fail_second_pull
+        record, _ = self.capture(device, path=SESSION_PATH, repeat=3, continue_on_error=True)
+        session = record["data"]
+        self.assertEqual(session["action"], "capture-session")
+        self.assertFalse(session["success"])
+        self.assertEqual((session["attempted_windows"], session["completed_windows"]), (3, 2))
+        self.assertEqual([entry["success"] for entry in session["windows"]], [True, False, True])
+        self.assertEqual([entry["index"] for entry in session["failures"]], [2])
+        self.assertEqual(len(device.start_commands()), 3, "later windows must still run")
+        self.assertTrue((Path(self.root) / SESSION_PATH / "window-01.pcap").is_file())
+        self.assertTrue((Path(self.root) / SESSION_PATH / "window-03.pcap").is_file())
+        self.assertFalse((Path(self.root) / SESSION_PATH / "window-02.pcap").exists())
+        self.assertFalse(device.capture_running)
+
 
     def test_window_precheck_refuses_to_start_when_a_foreign_capture_runs(self):
         device = Device(payload=b"\x12" * 32)

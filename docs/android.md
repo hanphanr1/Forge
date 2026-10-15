@@ -138,18 +138,24 @@ session: per window a scoped service precheck, a unique dump, optional `am force
 bounded window, an observed stop and a hash-verified pull to `window-NN.pcap` in an existing project directory.
 Each window gets its own evidence record, and one `capture-session` record lists every window, failure and the
 post-session service observation. A window failure stops further windows while completed files and records stay
-intact.
+intact; `--continue-on-error` keeps later windows running instead, with the session still reporting
+`success: false`. `pcapdroid-preflight` observes the PCAPdroid MITM addon (`com.pcapdroid.mitm`) as its own
+scoped fact, and `--tls-decryption` refuses with `mitm-addon-absent` before any Intent is sent when that addon
+is missing — on hardware the missing app otherwise looks like a consent timeout that never resolves.
 
 ### Cross-file caller candidates
 
-`android-caller-map --jadx-evidence ID --method NAME [--class OWNER]` answers "who calls this method name
+`android-caller-map --jadx-evidence ID --method NAME [--class OWNER] [--path-filter SUBSTRING]` answers "who
+calls this method name
 anywhere in the tree": bare calls list possible owner classes from that file's imports and same-package classes,
 receivers are classified (`this`, owner class, named, expression, constructor), declarations and annotations are
 skipped, and `--class` keeps only candidates attributable to one owner. These are name candidates, not a
 resolved call graph: overloads, inheritance, reflection and generated call sites are not resolved, and caps are
 reported. On the 23,387-file Grok tree, `--method a --class e5.c --max-files 5000` scanned 5,000 files in 58
 seconds and kept 39 bare + 11 owner-class candidates, with `truncated: true` because the file cap stopped the
-walk — raise the caps before treating absence as evidence.
+walk — raise the caps before treating absence as evidence. `--path-filter` (repeatable) scopes the walk to a
+path/class substring and is recorded in the evidence, so following one package no longer tokenizes the whole
+tree.
 
 ## Install a selected APK set
 

@@ -272,6 +272,15 @@ def android_caller_map(args, store):
         owner = owner[:-len(JAVA_SUFFIX)]
     if len(owner) > MAX_CLASS_LENGTH or (owner and not _CLASS_NAME.fullmatch(owner)):
         raise ForgeError("--class must be a dotted Java class name")
+    path_filters = []
+    for value in getattr(args, "path_filter", []) or []:
+        normalized = value.strip().replace("\\", "/")
+        if normalized.endswith(JAVA_SUFFIX):
+            normalized = normalized[:-len(JAVA_SUFFIX)]
+        normalized = normalized.strip("/")
+        if not normalized or len(normalized) > 512:
+            raise ForgeError("--path-filter must be a non-empty source path/class substring up to 512 characters")
+        path_filters.append(normalized.casefold())
     jadx_record = store.get(args.jadx_evidence)
     jadx_data = jadx_record["data"] if isinstance(jadx_record.get("data"), dict) else {}
     if jadx_record["kind"] != "analysis" or jadx_data.get("tool") != "jadx" or \
@@ -310,6 +319,10 @@ def android_caller_map(args, store):
                 truncated = True
                 break
             class_name = path.relative_to(source_root).with_suffix("").as_posix().replace("/", ".")
+            if path_filters:
+                posix = class_name.replace(".", "/")
+                if not any(term in posix.casefold() or term in class_name.casefold() for term in path_filters):
+                    continue
             sources.append((path, suffix, class_name))
             tree_classes.add(class_name)
             by_package.setdefault(_package(class_name), []).append(class_name)
@@ -396,7 +409,7 @@ def android_caller_map(args, store):
             candidate_count += 1
     return store.add("analysis", {
         "schema": SCHEMA, "tool": TOOL, "action": ACTION, "success": True,
-        "method_name": method_name, "owner_class": owner,
+        "method_name": method_name, "owner_class": owner, "path_filter": path_filters,
         "jadx_evidence_id": jadx_record["id"], "evidence_ids": [jadx_record["id"]],
         "source_root": _relative(store, source_root),
         "resolution": RESOLUTION, "overload_aware": False,
@@ -419,6 +432,9 @@ def register(subparsers):
     parser.add_argument("--method", required=True, help="Java method name to search for")
     parser.add_argument("--class", dest="owner_class",
                         help="Optional dotted owner class: keep only candidates that can name it")
+    parser.add_argument("--path-filter", action="append", default=[],
+                        help="Optional source path/class substring to scope the walk; repeatable, for example "
+                             "com/example or e5/c.java")
     parser.add_argument("--max-items", type=_positive, default=500, help="Maximum retained caller candidates")
     parser.add_argument("--max-files", type=_positive, default=50000, help="Maximum Java sources whose content is scanned")
     parser.add_argument("--max-file-bytes", type=_positive, default=16 * 1024 * 1024)

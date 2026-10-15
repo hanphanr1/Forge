@@ -89,6 +89,8 @@ _DECRYPTION_SCOPE = ("TLS decryption is requested through PCAPdroid's own settin
                      "is never evidence that a given flow was decrypted.")
 _DECRYPTION_LIMIT = ("--tls-decryption is a request, not decryption: without the operator-installed PCAPdroid CA, "
                      "without app trust or with certificate pinning the captured flows stay encrypted")
+MITM_PACKAGE = "com.pcapdroid.mitm"
+MITM_REPOSITORY = "https://github.com/emanuele-f/PCAPdroid-mitm"
 _SCOPE = ("Rootless PCAPdroid capture control through its documented Intent API only. Recorded evidence covers ADB "
           "dispatch, scoped CaptureService observations and the unique dump file; consent prompts, VPN approval, "
           "packet contents, app-filter correctness and any Activity result extras are not proven here. The retrieved "
@@ -298,6 +300,7 @@ def _preflight(serial=None, package=None):
                                   "can be refused or started")
         return result
     result["capture_running"] = service["running"]
+    result["mitm_addon"] = _mitm_facts(adb, adb_serial)
     if package is not None:
         target_package = _package_facts(adb, adb_serial, package)
         result["target_package"] = target_package
@@ -317,6 +320,20 @@ def _preflight(serial=None, package=None):
     else:
         result["status"] = "ready"
     return result
+
+
+def _mitm_facts(adb, serial):
+    """One scoped package query: the decryption addon is a separate app the operator installs."""
+    detail = _run([adb, "-s", serial, "shell", "dumpsys", "package", MITM_PACKAGE], PREFLIGHT_TIMEOUT)
+    observed = _complete(detail)
+    text = _text(detail["stdout"])
+    version_name, version_code = VERSION_NAME.search(text), VERSION_CODE.search(text)
+    return {"package": MITM_PACKAGE, "observed": observed,
+            "installed": observed and bool(version_name or version_code),
+            "version_name": version_name.group(1) if version_name else None,
+            "version_code": int(version_code.group(1)) if version_code else None,
+            "required_by_pcapanalysis_only": False, "repository": MITM_REPOSITORY,
+            "calls": {"mitm_package_detail": _bounded_call(detail)}}
 
 
 # --------------------------------------------------------------------------- capture
@@ -357,7 +374,8 @@ def _capture_options(args):
     gap = getattr(args, "gap", 0)
     if type(gap) not in (int, float) or not 0 <= gap <= MAX_GAP_SECONDS:
         raise ForgeError(f"--gap must be a number of seconds between 0 and {MAX_GAP_SECONDS}")
-    for name, label in (("force_stop", "--force-stop"), ("tls_decryption", "--tls-decryption")):
+    for name, label in (("force_stop", "--force-stop"), ("tls_decryption", "--tls-decryption"),
+                        ("continue_on_error", "--continue-on-error")):
         if type(getattr(args, name, False)) is not bool:
             raise ForgeError(f"{label} is a flag and takes no value")
     package = getattr(args, "package", None)
@@ -367,7 +385,8 @@ def _capture_options(args):
             "max_bytes": args.max_bytes, "package": package, "repeat": repeat, "gap": gap,
             "launch": _launch_value(getattr(args, "launch", None)), "force_stop": getattr(args, "force_stop", False),
             "tls_decryption": getattr(args, "tls_decryption", False),
-            "serial": _serial_value(getattr(args, "serial", None), "--serial")}
+            "serial": _serial_value(getattr(args, "serial", None), "--serial"),
+            "continue_on_error": getattr(args, "continue_on_error", False)}
 
 
 def _api_key(environment):
@@ -968,6 +987,13 @@ def pcapdroid_capture(args, store):
     try:
         if facts["status"] != "ready":
             raise ForgeError(f"Capture prerequisite missing: {facts['status']}")
+        if options["tls_decryption"]:
+            mitm = facts.get("mitm_addon") or {}
+            if not mitm.get("installed"):
+                # PCAPdroid accepts the Intent but never starts the service without its addon app,
+                # so refusing here turns a silent 60-second consent timeout into one clear message.
+                raise ForgeError(f"Capture prerequisite missing: mitm-addon-absent; install the PCAPdroid mitm "
+                                 f"addon ({MITM_PACKAGE}, {MITM_REPOSITORY}) and its CA, then retry")
         for index, destination in enumerate(destinations, start=1):
             if index > 1:
                 _gap(options["gap"])
@@ -979,6 +1005,9 @@ def pcapdroid_capture(args, store):
                 continue
             failures.append(outcome["failure"])
             failed = outcome
+            if options["continue_on_error"] and count > 1:
+                failed = None
+                continue
             break
     except (ForgeError, OSError, ValueError, sqlite3.Error) as error:
         # Only a session-level refusal reaches here: window failures record themselves and end the loop.
@@ -1050,6 +1079,9 @@ def register(subparsers):
     parser.add_argument("--tls-decryption", action="store_true",
                         help="Request PCAPdroid TLS decryption for the target package; needs a user-installed "
                              "PCAPdroid CA and app trust, and FORGE installs nothing")
+    parser.add_argument("--continue-on-error", action="store_true",
+                        help="With --repeat, keep running later windows after one fails; the session record still "
+                             "reports success false when any window failed")
     parser.add_argument("--api-key-env",
                         help="Environment variable holding the PCAPdroid API key; the key is never stored or echoed")
     parser.add_argument("--max-bytes", type=int, default=33554432,
