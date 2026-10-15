@@ -26,6 +26,7 @@ MAX_TOTAL_OBSERVATIONS = 20000
 MAX_NETWORK_HOSTS = 200
 MAX_NETWORK_MATCHES = 200
 MAX_NETWORK_KINDS = 8
+MAX_NETWORK_HTTP_VALUES = 8
 
 
 def _relevant(record):
@@ -207,8 +208,27 @@ def _http(record):
     return {"url": url, "method": scrub_text(request["method"])}, observation, _citation(record)
 
 
+def _http_values(entry, key):
+    """Return (bounded values, omitted) for one request-line list on a stored host entry.
+
+    ``(None, False)`` means the entry declares no such list at all. Unusable items and values
+    beyond the bound are reported as omitted rather than silently dropped.
+    """
+    values = entry.get(key)
+    if not isinstance(values, list):
+        return None, False
+    usable = [value for value in values if isinstance(value, str) and value]
+    text = sorted({scrub_text(value) for value in usable})
+    omitted = len(text) > MAX_NETWORK_HTTP_VALUES or len(usable) != len(values)
+    return text[:MAX_NETWORK_HTTP_VALUES], omitted
+
+
 def _network(record):
-    """Host identities observed in one cited packet analysis, with no path or body claim."""
+    """Host identities observed in one cited packet analysis, with bounded request-line metadata.
+
+    No path is invented: a host identity stays a host, and the copied method and origin-form
+    request path come from the cited analysis exactly as it reported them, with no query string.
+    """
     data = record["data"]
     hosts = data.get("hosts")
     capture = data.get("capture")
@@ -223,6 +243,7 @@ def _network(record):
         location["size"] = capture_size
     emitted, hosts_omitted = [], len(hosts) > MAX_NETWORK_HOSTS
     kinds_omitted = False
+    http_values_omitted = False
     for entry in hosts[:MAX_NETWORK_HOSTS]:
         if not isinstance(entry, dict) or not isinstance(entry.get("hostname"), str):
             continue
@@ -230,7 +251,6 @@ def _network(record):
         if not isinstance(observations, list):
             continue
         kinds = {}
-        kinds_omitted = False
         timestamps = []
         for item in observations:
             if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
@@ -242,6 +262,9 @@ def _network(record):
             timestamp = item.get("timestamp")
             if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
                 timestamps.append(round(float(timestamp), 6))
+        methods, methods_omitted = _http_values(entry, "http_methods")
+        paths, paths_omitted = _http_values(entry, "http_paths")
+        http_values_omitted |= methods_omitted or paths_omitted
         observation = {"category": "captured_network", "proven_live": False, "proven_auth_path": False,
                        "observation_kinds": {name: kinds[name] for name in sorted(kinds)},
                        "observation_count": len(observations),
@@ -249,7 +272,12 @@ def _network(record):
                        "last_timestamp": max(timestamps) if timestamps else None,
                        "decryption_performed": bool(data.get("decryption_performed")),
                        "note": "Hostname came from packet metadata (DNS/TLS SNI/plaintext Host); it is not a "
-                               "successful call and no request path, method, body or authentication is proven."}
+                               "successful call, and a copied request method and origin-form path keep no "
+                               "query string, header or body and prove no authentication."}
+        if methods is not None:
+            observation["http_methods"] = methods
+        if paths is not None:
+            observation["http_paths"] = paths
         emitted.append(({"host": scrub_text(entry["hostname"])}, observation, _citation(record, location)))
     matches = data.get("static_host_matches")
     match_note = data.get("static_host_match_note")
@@ -270,7 +298,7 @@ def _network(record):
             if isinstance(evidence_id, str) and evidence_id.startswith("ev_"):
                 citations.append({"evidence_id": evidence_id, "location": {"kind": "static_candidate"}})
         emitted.append(({"host": scrub_text(entry["hostname"])}, observation, citations))
-    return emitted, hosts_omitted or match_omitted or kinds_omitted
+    return emitted, hosts_omitted or match_omitted or kinds_omitted or http_values_omitted
 
 
 def protocol_map(args, store):
@@ -377,7 +405,8 @@ def protocol_map(args, store):
                        "citations_per_observation": MAX_CITATIONS, "search_matches_per_record": 1000,
                        "search_candidates_per_match": 20, "hosts_per_packet_record": MAX_NETWORK_HOSTS,
                        "static_host_matches_per_record": MAX_NETWORK_MATCHES,
-                       "observation_kinds_per_host": MAX_NETWORK_KINDS},
+                       "observation_kinds_per_host": MAX_NETWORK_KINDS,
+                       "http_values_per_host": MAX_NETWORK_HTTP_VALUES},
             "authentication_verified": False}
 
 

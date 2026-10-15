@@ -179,9 +179,9 @@ Protocol snapshots retain citations and omission flags; their diffs distinguish 
 | Area | Commands | Boundary |
 |---|---|---|
 | Task handoff | `init`, `status`, `checkpoint`, `resume`, `history` | Agent-reported progress, not automatic verification |
-| Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search`, `android-api-map` | DEX strings to Java method/field contexts and same-class caller candidates, with source citations; no runtime or resolved-callgraph claim |
+| Artifacts | `artifact-add`, `artifact-fetch`, `artifact-index`, `search`, `android-api-map`, `android-caller-map` | DEX strings to Java method/field contexts, same-class traces and cross-file caller-name candidates, with source citations; no runtime or resolved-callgraph claim |
 | Runtime | `jadx`, `native`, `adb`, `adb-preflight`, `adb-install-splits`, `adb pull-package`, `adb observe`, `apk-info`, `frida`, `doctor` | Actual installed tools; split selection and compatible authorized hardware are explicit; `observe` captures process logcat, not HTTP/TLS |
-| Network capture | `pcapdroid-preflight`, `pcapdroid-capture`, `pcap-analyze` | Rootless capture through the installed PCAPdroid app, then bounded PCAP names/hosts/flows with cited static-host correlation; raw packets stay local and nothing is decrypted |
+| Network capture | `pcapdroid-preflight`, `pcapdroid-capture`, `pcap-analyze` | Rootless capture through the installed PCAPdroid app (opt-in decryption request, scripted multi-window sessions), then bounded PCAP names/hosts/paths with cited static-host correlation; raw packets stay local and nothing is decrypted by FORGE |
 | APK patching | `apk-decode`, `apk-manifest`, `apk-rebuild`, `apk-sign`, `apk-gadget` | Unsigned rebuilds stay unsigned; signing never publishes output that fails verification; a Gadget repackage is recorded as a debuggable build with a replaced signature |
 | iOS boundary | `ios-devices`, `ios-pair` | Read-only external tool observations; no capture, hooking or injection capability |
 | Maintenance | `storage-report`, `evidence-prune` | Read-only inventory; pruning is opt-in and breaks the append-only citation guarantee |

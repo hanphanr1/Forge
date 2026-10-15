@@ -2,9 +2,11 @@
 
 Reads classic (libpcap) captures, validates record framing, and reports connection
 metadata and host names only. Supported observations are DNS query/answer names,
-TLS ClientHello SNI and plaintext HTTP Host. Payload bytes, request targets,
-headers (other than Host), bodies and credentials are never returned, and nothing
-is decrypted or replayable.
+TLS ClientHello SNI and plaintext HTTP Host, plus the method and origin-form request
+path of a decoded plaintext request line. Payload bytes, query strings, headers
+(other than Host), bodies and credentials are never returned, FORGE itself never
+decrypts anything (only a cited capture record can declare that decryption was
+requested), and nothing here is replayable.
 
 Reported top-level fields (JSON-safe):
 
@@ -15,15 +17,18 @@ Reported top-level fields (JSON-safe):
 - ``malformed_packets``/``unsupported_packets``/``captured_packet_truncations``/``truncated_dissections``
 - ``fragmented_packets``/``records_skipped_oversized``/``vlan_packets``/``linktype_fallbacks``
 - ``unsupported_link_types``/``unsupported_ethertypes``/``unsupported_ip_protocols`` and omission flags
-- ``dns_messages``/``dns_questions``/``dns_answers``/``tls_client_hellos``/``http_requests`` counters
-- ``hosts``: ``[{hostname, observations, observation_count, observations_omitted}]``
+- ``dns_messages``/``dns_questions``/``dns_answers``/``tls_client_hellos``/``http_requests``/
+  ``http_request_lines`` counters; ``http_request_lines`` counts request lines whose method and
+  origin-form path were decoded, whether or not a host name was recorded for them
+- ``hosts``: ``[{hostname, observations, observation_count, observations_omitted}]``; a host with
+  decoded request lines also carries bounded ``http_methods``/``http_paths`` and their omission flags
 - ``flows``: bounded directional connection summaries with first/last observed timestamps
 - ``trailer``: PCAPdroid trailer claim counters (uid values, package hints, checksum mismatches)
 - ``first_timestamp``/``last_timestamp``/``duration_seconds``/``empty``
-- ``decryption_performed`` (always ``False``) and ``scope``
+- ``decryption_performed`` (computed, never assumed) and ``scope``
 - ``limits`` echo of the applied bounds
-- with ``--capture-evidence``: ``capture`` citation, ``evidence_ids`` and, when the capture
-  declares a ``target_uid``, ``uid_attribution`` counts that keep target, other and unknown UID
+- with ``--capture-evidence``: ``capture`` citation, ``decryption_basis``, ``evidence_ids`` and, when the
+  capture declares a ``target_uid``, ``uid_attribution`` counts that keep target, other and unknown UID
   traffic separate instead of calling every packet target traffic
 - with ``--map-evidence``: ``static_host_matches``, ``map_citations``, ``static_host_match_note``
 
@@ -102,6 +107,8 @@ PCAPDROID_HINT_CHARS = 19
 
 PROBE_BUFFER = 8192
 HTTP_SCAN_BYTES = 4096
+MAX_HTTP_METHOD_CHARS = 8
+MAX_HTTP_PATH_CHARS = 2048
 TLS_MAX_RECORD = 16384 + 2048
 TLS_MAX_HANDSHAKE = 65536
 TLS_HELLO_MINIMUM = 34
@@ -120,6 +127,7 @@ DNS_SRV = 33
 DNS_SOA = 6
 
 OBSERVATIONS_PER_HOST = 8
+HTTP_VALUES_PER_HOST = 8
 MAX_UNSUPPORTED_VALUES = 32
 MAX_OMITTED_FLOW_KEYS = 256
 MAX_TRAILER_VALUES = 32
@@ -161,6 +169,7 @@ COUNTER_NAMES = (
     "tls_sni_truncated",
     "http_requests",
     "http_hosts",
+    "http_request_lines",
     "http_probes_truncated",
     "invalid_hostnames",
     "trailer_packets",
@@ -173,11 +182,20 @@ SCOPE = (
     "Observed packets from one classic PCAP file, not successful application calls, sessions or "
     "authentication: every host name and connection summary is derived from packets that the file "
     "already contains, with the record timestamp. "
-    "No decryption or key material is used: QUIC, ECH payloads, DoH, DoT, pinned or otherwise "
-    "encrypted traffic cannot contribute names, and payload bytes are never returned. "
+    "FORGE uses no decryption and no key material, and never requests either: QUIC, ECH payloads, DoH, "
+    "DoT, pinned or otherwise encrypted traffic can only contribute names that the capture already "
+    "holds in plaintext, which is possible only when PCAPdroid itself decrypted before writing the "
+    "file and the cited capture record declares that decryption was requested. Payload bytes are never "
+    "returned. "
     "Only DNS question names, names inside DNS answer record data (CNAME/NS/PTR/SOA/MX/SRV), TLS "
-    "ClientHello SNI and plaintext HTTP Host are reported; request targets, headers other than Host, "
-    "bodies and credentials are never copied into the output. "
+    "ClientHello SNI, plaintext HTTP Host and the method with the origin-form request path of a decoded "
+    "request line are reported. That path stops at the query string, keeps percent-encoding and is "
+    "bounded; query strings, headers other than Host, bodies and credentials are never copied into the "
+    "output. A request line whose target is not origin-form contributes no method and no path, and "
+    "request-line values are attached only to a host name that was itself recorded. "
+    "decryption_performed is true only when the cited capture record declares that TLS decryption was "
+    "requested and at least one request line was decoded from this file; it is a declared setting plus "
+    "a decoded-line fact reported by decryption_basis, never proof that one flow was decrypted. "
     "DNS, TLS and HTTP observations are independent: no DNS-to-TLS or DNS-to-HTTP causality is "
     "inferred from ordering or timing. "
     "PCAPdroid trailer UID and app package hint are file-declared per-packet claims, not independent "
@@ -189,10 +207,21 @@ SCOPE = (
     "unrecorded contribute no name observation and no flow summary."
 )
 
+DECRYPTION_RULE = (
+    "decryption_performed is true only when the cited capture record declares that TLS decryption was "
+    "requested and this analysis decoded at least one HTTP request line. FORGE decrypts nothing and "
+    "installs nothing: PCAPdroid writes the bytes it already decrypted into the capture, so decoded "
+    "request lines in a capture whose record requested decryption are consistent with decryption "
+    "without proving that any particular flow was decrypted, and decoded request lines in a capture "
+    "that never requested decryption are plaintext traffic instead."
+)
+
 _LABEL = re.compile(r"[a-z0-9_-]{1,63}\Z")
 _PACKAGE_HINT = re.compile(r"[A-Za-z0-9._-]{1,20}\Z")
-_HTTP_REQUEST_LINE = re.compile(rb"([A-Z]{3,8}) ([\x21-\x7e]{1,2048}) HTTP/1\.[01]\r\n\Z")
-_HTTP_PREFIX = re.compile(rb"[A-Z]{3,8} [\x21-\x7e]")
+_HTTP_METHOD_BYTES = ("[A-Z]{1,%d}" % MAX_HTTP_METHOD_CHARS).encode("ascii")
+_HTTP_REQUEST_LINE = re.compile(rb"(" + _HTTP_METHOD_BYTES + rb") ([\x21-\x7e]{1,2048}) HTTP/1\.[01]\r\n\Z")
+_HTTP_PREFIX = re.compile(_HTTP_METHOD_BYTES + rb" [\x21-\x7e]")
+_HTTP_PATH = re.compile(("/[\\x21-\\x7e]{0,%d}\\Z" % (MAX_HTTP_PATH_CHARS - 1)).encode("ascii"))
 _SHA256 = re.compile(r"[a-f0-9]{64}\Z")
 
 STATIC_MATCH_NOTE = (
@@ -557,28 +586,42 @@ def _client_hello(data):
     return _hello_body(handshake[4:4 + declared])
 
 
-def _http_host(data):
-    """Return (status, host_bytes). Request target, headers and body are never returned."""
+def _http_request(data):
+    """Return (status, host_bytes, method_bytes, path_bytes) for one plaintext request head.
+
+    The method and path are returned together or not at all: the request-line pattern already
+    validates the method as A-Z within ``MAX_HTTP_METHOD_CHARS``, and the path is kept only when
+    the target is origin-form, so its query string, its header block and its body are never
+    returned and are never partially accepted.
+    """
     if not _HTTP_PREFIX.match(data[:12]):
-        return "unsupported", None
+        return "unsupported", None, None, None
     line_end = data.find(b"\r\n")
     if line_end < 0:
-        return ("needmore", None) if len(data) < HTTP_SCAN_BYTES else ("truncated", None)
+        if len(data) < HTTP_SCAN_BYTES:
+            return "needmore", None, None, None
+        return "truncated", None, None, None
     match = _HTTP_REQUEST_LINE.match(data[:line_end + 2])
     if match is None:
-        return "unsupported", None
+        return "unsupported", None, None, None
     if match.group(1) == b"CONNECT":
         # authority-form request target carries no Host header
-        return "unsupported", None
+        return "unsupported", None, None, None
+    method, path = match.group(1), match.group(2).split(b"?", 1)[0]
+    if _HTTP_PATH.match(path) is None:
+        # Absolute, asterisk or authority form: no origin-form path exists to report.
+        method = path = None
     head = data[line_end + 2:]
     head_end = head.find(b"\r\n\r\n")
     if head_end < 0:
-        return ("needmore", None) if len(head) < HTTP_SCAN_BYTES else ("truncated", None)
+        if len(head) < HTTP_SCAN_BYTES:
+            return "needmore", None, None, None
+        return "truncated", None, None, None
     for line in head[:head_end].split(b"\r\n"):
         name, separator, value = line.partition(b":")
         if separator and name.strip().lower() == b"host":
-            return "ok", value.strip()
-    return "ok", None
+            return "ok", value.strip(), method, path
+    return "ok", None, method, path
 
 
 # ---------------------------------------------------------------- scan state
@@ -1046,7 +1089,7 @@ class _Scan:
                      trailer=trailer, ech=flags["encrypted_client_hello"])
 
     def _http(self, state, flow, index, timestamp, endpoints, trailer):
-        status, host = _http_host(bytes(state["buffer"]))
+        status, host, method, path = _http_request(bytes(state["buffer"]))
         if status == "needmore":
             if state["truncated"]:
                 state["decided"] = True
@@ -1064,6 +1107,8 @@ class _Scan:
         if status != "ok":
             return
         self.bump("http_requests")
+        if method is not None:
+            self.bump("http_request_lines")
         if host is None:
             return
         name = _hostname(host)
@@ -1073,6 +1118,27 @@ class _Scan:
         flow["http_host"] = name
         self.bump("http_hosts")
         self.observe("http_host", name, index=index, timestamp=timestamp, endpoints=endpoints, trailer=trailer)
+        if method is not None:
+            self.request_line(name, method, path)
+
+    def request_line(self, name, method, path):
+        """Attach one decoded request line's method and origin-form path to its host entry.
+
+        ``observe`` runs first for the same request, so a missing entry means the host bound
+        dropped the name and the request line has no host identity to be reported against.
+        """
+        entry = self.hosts.get(name)
+        if entry is None:
+            return
+        if "http_methods" not in entry:
+            entry["http_methods"], entry["http_paths"] = [], []
+            entry["http_methods_omitted"] = entry["http_paths_omitted"] = False
+        if _bounded_add(entry["http_methods"], method.decode("ascii"), HTTP_VALUES_PER_HOST):
+            entry["http_methods_omitted"] = True
+            self.truncated = True
+        if _bounded_add(entry["http_paths"], path.decode("ascii"), HTTP_VALUES_PER_HOST):
+            entry["http_paths_omitted"] = True
+            self.truncated = True
 
     # ------------------------------------------------------------ output
 
@@ -1120,6 +1186,8 @@ class _Scan:
             "limits": {"max_bytes": None, "max_packets": None, "max_hosts": self.max_hosts,
                        "max_flows": self.max_flows, "observations_per_host": OBSERVATIONS_PER_HOST,
                        "probe_buffer_bytes": PROBE_BUFFER, "http_head_bytes": HTTP_SCAN_BYTES,
+                       "http_method_chars": MAX_HTTP_METHOD_CHARS, "http_path_chars": MAX_HTTP_PATH_CHARS,
+                       "http_values_per_host": HTTP_VALUES_PER_HOST,
                        "dns_questions_per_message": MAX_DNS_QUESTIONS,
                        "dns_answers_per_message": MAX_DNS_ANSWERS,
                        "vlan_tags": MAX_VLAN_TAGS, "ipv6_extension_headers": MAX_IPV6_EXTENSION_HEADERS},
@@ -1209,6 +1277,23 @@ def _citation_sha(value):
     return value.lower()
 
 
+def _decryption_requested(data):
+    """True when one capture record declares that TLS decryption was requested.
+
+    The declaration is a requested setting of the capturing app: a capture that never asked
+    for TLS decryption cannot hold decrypted bytes, but asking for it is not evidence that any
+    particular traffic was decrypted. The same request appears both as the record's
+    ``decryption_requested`` evidence flag and as its ``settings.tls_decryption`` setting.
+    """
+    if data.get("decryption_requested") is True:
+        return True
+    settings = data.get("settings")
+    if not isinstance(settings, dict):
+        return False
+    # The adb command line renders the setting as "true"; a parsed record keeps the Python bool.
+    return settings.get("tls_decryption") in (True, "true")
+
+
 def _capture_citation(store, evidence_id, path, digest):
     record = store.get(evidence_id)
     data = record.get("data") if isinstance(record.get("data"), dict) else {}
@@ -1242,6 +1327,7 @@ def _capture_citation(store, evidence_id, path, digest):
             "package": data.get("package") if isinstance(data.get("package"), str) else None,
             "target_uid": data.get("target_uid") if type(data.get("target_uid")) is int else None,
             "capture_empty": data.get("empty") if isinstance(data.get("empty"), bool) else None,
+            "decryption_requested": _decryption_requested(data),
             "sha256_matches": True, "size_matches": True, "path_matches": True,
             "capture_truncation_flags": overrun,
             "capture_truncated": bool(overrun),
@@ -1393,6 +1479,11 @@ def pcap_analyze(args, store):
         citation = _capture_citation(store, args.capture_evidence, path, metadata["input"])
         metadata["capture"] = citation
         evidence_ids.append(args.capture_evidence)
+        metadata["decryption_performed"] = bool(citation["decryption_requested"] and
+                                                metadata["http_request_lines"] > 0)
+        metadata["decryption_basis"] = {"decryption_requested": citation["decryption_requested"],
+                                        "http_request_lines": metadata["http_request_lines"],
+                                        "rule": DECRYPTION_RULE}
         if citation["capture_truncated"]:
             # The capture itself reported a size overrun, so this file is not the whole session.
             metadata["truncated"] = True

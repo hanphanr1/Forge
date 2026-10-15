@@ -214,6 +214,9 @@ def _tokenize(text):
     return tokens
 
 
+tokenize = _tokenize
+
+
 class _Scope:
     """One nesting level: a type body, method body, initializer block, transparent
     statement block or an excluded class boundary (nested, local, anonymous)."""

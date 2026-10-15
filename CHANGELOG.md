@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.0 - 2026-10-15
+
+- `pcapdroid-capture --tls-decryption` (opt-in) requests PCAPdroid's own decryption mode scoped to the target app via `decryption_rules` with `block_quic to_decrypt`. FORGE installs no CA, adds no trust anchor and edits nothing: the request, operator approval and scope are recorded, and an app that distrusts user CAs or pins certificates simply stays encrypted.
+- `pcap-analyze` computes `decryption_performed` instead of assuming it: true only when the cited capture declared a decryption request and at least one HTTP request line was decoded, with the rule kept in `decryption_basis`. Plaintext (or PCAPdroid-decrypted) request lines now yield bounded `http_methods` and origin-form `http_paths` per host, query strings stripped entirely; headers, bodies and query values are never retained.
+- `pcapdroid-capture --repeat N --gap SECONDS [--launch PACKAGE/ACTIVITY] [--force-stop]` runs scripted multi-window sessions: per window a scoped service precheck, a unique dump, optional `am force-stop`/`am start -W`, the bounded window, an observed stop and a hash-verified pull to `window-NN.pcap`, each with its own evidence record plus one `capture-session` record; a window failure stops further windows while completed files and records stay intact.
+- New `android-caller-map --jadx-evidence ID --method NAME [--class OWNER]` finds cross-file caller-name candidates in a cited JADX output: receivers are classified (`this`, owner class, named, expression, constructor), bare calls list possible owners from imports and same-package classes, declarations and annotations are skipped, and caps report truncation. Results are name candidates; overloads, inheritance, reflection and generated call sites stay unresolved.
+- Bundle projection covers the new fields (window/session facts, decryption request flags, caller-map counts and receiver kinds) while continuing to withhold hostnames, paths, methods, receiver spellings, local files and `http_paths`.
+- Exercised on the real Grok artifacts: `android-caller-map --method a --class e5.c --max-files 5000` scanned 5,000 of 23,387 files in 58 seconds and kept 39 bare + 11 owner-class candidates with `truncated: true`; re-analysing the earlier 24,516-byte TLS capture reported `http_request_lines: 0`, `decryption_performed: false` and the recorded basis. No device was touched for these checks.
+
 ## 0.14.0 - 2026-10-15
 
 - `protocol-map` now consumes `pcap-analyze` packet analyses and `api-map` analyses, which 0.11 and 0.13 added without wiring them into the summary. Packet hosts appear as `captured_network` observations under a host-only identity that never merges with a URL, and a `static_host_match` links an observed hostname to a cited static candidate by `static_candidate_sha256`.

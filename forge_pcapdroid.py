@@ -1,16 +1,22 @@
-"""Rootless PCAPdroid capture control over ADB: preflight facts and one bounded, cited session.
+"""Rootless PCAPdroid capture control over ADB: preflight facts and bounded, cited sessions.
 
 The only capture path here is PCAPdroid's documented Intent API driven through the
 configured ADB server. An accepted ``am start`` is a dispatch observation: it is not an
 Activity result and not capture success. A capture is only reported successful when the
 scoped CaptureService observation and the unique dump file were observed to start, the
 stop was observed to take that service down, and a new private PCAP file was retrieved
-and hashed. No root, CA, decryption, emulator or app preference access is used.
+and hashed. No root, emulator or app preference access is used.
+
+Two opt-ins extend that path without changing its guarantees. ``--tls-decryption`` asks
+PCAPdroid for its own decryption mode; FORGE installs no CA and decrypts nothing itself.
+``--repeat`` runs several bounded windows in one session, each with its own dump file and
+its own evidence record, plus one capture-session record over all of them.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -43,6 +49,8 @@ MAX_FILE_BYTES = 128 * 1024 * 1024
 MAX_SECONDS = 300
 MAX_CONSENT_SECONDS = 120
 MAX_TOOL_SECONDS = 120
+MAX_REPEATS = 20
+MAX_GAP_SECONDS = 60
 PREFLIGHT_TIMEOUT = 15
 POLL_SECONDS = 0.5
 SETTLE_SECONDS = 5
@@ -55,6 +63,10 @@ PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z"
 SERIAL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 CAPTURE_NAME = re.compile(r"forge-[a-f0-9]{32}\.pcap\Z")
 DEVICE_PATH = re.compile(r"/sdcard/Download/PCAPdroid/forge-[a-f0-9]{32}\.pcap\Z")
+WINDOW_FILE = re.compile(r"window-[0-9]{2}\.pcap\Z")
+# The launch component is validated like forge_runtime's `adb launch --component`: one
+# PACKAGE/ACTIVITY pair, no shell, whitespace or option characters.
+LAUNCH_COMPONENT = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+/[A-Za-z0-9_.$]+\Z")
 API_KEY_PLACEHOLDER = "<forge-api-key>"
 ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 UNSAFE_FILE_NAME = re.compile(r'[<>:"|?*\x00-\x1f]')
@@ -70,6 +82,13 @@ VERSION_CODE = re.compile(r"\bversionCode=([0-9]+)")
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 _EMPTY_SERVICE_OUTPUT = "(nothing)"
 
+_DECRYPTION_SCOPE = ("TLS decryption is requested through PCAPdroid's own setting only: FORGE installs no CA, adds no "
+                     "trust anchor and edits no app preference. Decryption needs the PCAPdroid CA installed by the "
+                     "operator and trusted by the target app, and certificate pinning, QUIC-only paths, non-HTTP "
+                     "protocols or an app that ignores user CAs commonly stay undecrypted, so a requested decryption "
+                     "is never evidence that a given flow was decrypted.")
+_DECRYPTION_LIMIT = ("--tls-decryption is a request, not decryption: without the operator-installed PCAPdroid CA, "
+                     "without app trust or with certificate pinning the captured flows stay encrypted")
 _SCOPE = ("Rootless PCAPdroid capture control through its documented Intent API only. Recorded evidence covers ADB "
           "dispatch, scoped CaptureService observations and the unique dump file; consent prompts, VPN approval, "
           "packet contents, app-filter correctness and any Activity result extras are not proven here. The retrieved "
@@ -83,6 +102,10 @@ _LIMITS = [
     "Packet-level hosts, flows and app-filter correctness stay analysis-time claims; dump UID/package metadata is not independent attestation",
     "Raw PCAP bytes are never printed, exported or summarised by this command",
 ]
+
+
+def _limits(options):
+    return _LIMITS + ([_DECRYPTION_LIMIT] if options["tls_decryption"] else [])
 
 
 def _run(command, timeout, binary=False):
@@ -311,6 +334,14 @@ def _serial_value(value, label):
     return value
 
 
+def _launch_value(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not LAUNCH_COMPONENT.fullmatch(value):
+        raise ForgeError("--launch must name a PACKAGE/COMPONENT from the manifest, for example ai.x.grok/.MainActivity")
+    return value
+
+
 def _capture_options(args):
     bounds = (("seconds", 1, MAX_SECONDS, "seconds"), ("consent_timeout", 1, MAX_CONSENT_SECONDS, "consent-timeout"),
               ("timeout", 1, MAX_TOOL_SECONDS, "timeout"))
@@ -320,11 +351,23 @@ def _capture_options(args):
             raise ForgeError(f"--{label} must be an integer between {low} and {high}")
     if type(getattr(args, "max_bytes", None)) is not int or not MIN_FILE_BYTES <= args.max_bytes <= MAX_FILE_BYTES:
         raise ForgeError(f"--max-bytes must be an integer between {MIN_FILE_BYTES} and {MAX_FILE_BYTES}")
+    repeat = getattr(args, "repeat", 1)
+    if type(repeat) is not int or not 1 <= repeat <= MAX_REPEATS:
+        raise ForgeError(f"--repeat must be an integer between 1 and {MAX_REPEATS}")
+    gap = getattr(args, "gap", 0)
+    if type(gap) not in (int, float) or not 0 <= gap <= MAX_GAP_SECONDS:
+        raise ForgeError(f"--gap must be a number of seconds between 0 and {MAX_GAP_SECONDS}")
+    for name, label in (("force_stop", "--force-stop"), ("tls_decryption", "--tls-decryption")):
+        if type(getattr(args, name, False)) is not bool:
+            raise ForgeError(f"{label} is a flag and takes no value")
     package = getattr(args, "package", None)
     if not isinstance(package, str) or not PACKAGE_NAME.fullmatch(package):
         raise ForgeError("Provide a valid --package name, for example ai.x.grok")
     return {"seconds": args.seconds, "consent_timeout": args.consent_timeout, "timeout": args.timeout,
-            "max_bytes": args.max_bytes, "package": package, "serial": _serial_value(getattr(args, "serial", None), "--serial")}
+            "max_bytes": args.max_bytes, "package": package, "repeat": repeat, "gap": gap,
+            "launch": _launch_value(getattr(args, "launch", None)), "force_stop": getattr(args, "force_stop", False),
+            "tls_decryption": getattr(args, "tls_decryption", False),
+            "serial": _serial_value(getattr(args, "serial", None), "--serial")}
 
 
 def _api_key(environment):
@@ -341,44 +384,93 @@ def _api_key(environment):
     return key, environment
 
 
-def _new_destination(store, value):
+def _local_path(value, prompt):
+    """Reject device, UNC, alternate-stream and traversing --path values; return the relative path."""
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise ForgeError("Provide a new --path for the retrieved PCAP file")
+        raise ForgeError(prompt)
     text = value.strip()
     if text.startswith("\\\\") or (":" in text and not re.match(r"^[A-Za-z]:[\\/]", text)):
         raise ForgeError("Use a local filesystem path, not a device, UNC or alternate-stream path")
     relative = Path(text)
     if ".." in relative.parts:
         raise ForgeError("Path traversal is not allowed in --path")
-    if relative.suffix.lower() != ".pcap":
-        raise ForgeError("--path must name a new .pcap file")
-    if UNSAFE_FILE_NAME.search(relative.name):
-        raise ForgeError("--path must name a plain file name")
-    destination = relative if relative.is_absolute() else store.root / relative
+    return relative
+
+
+def _in_project(store, path):
+    destination = path if path.is_absolute() else store.root / path
     destination = Path(os.path.abspath(destination))
     if not destination.is_relative_to(store.root.resolve()):
         raise ForgeError("Capture destination must remain inside the project")
-    if destination.exists() or destination.is_symlink():
-        raise ForgeError("Destination already exists; choose a new --path")
-    parent = destination.parent
-    if not parent.is_dir():
-        raise ForgeError("Destination directory does not exist")
-    for part in (*reversed(parent.parents), parent):
+    return destination
+
+
+def _reject_symlink_chain(directory):
+    for part in (*reversed(directory.parents), directory):
         try:
             info = part.lstat()
         except OSError as error:
             raise ForgeError(f"Destination directory is not usable: {part}") from error
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & REPARSE_POINT:
             raise ForgeError(f"Symlink/reparse destination paths are not allowed: {part}")
+
+
+def _new_destination(store, value):
+    relative = _local_path(value, "Provide a new --path for the retrieved PCAP file")
+    if relative.suffix.lower() != ".pcap":
+        raise ForgeError("--path must name a new .pcap file")
+    if UNSAFE_FILE_NAME.search(relative.name):
+        raise ForgeError("--path must name a plain file name")
+    destination = _in_project(store, relative)
+    if destination.exists() or destination.is_symlink():
+        raise ForgeError("Destination already exists; choose a new --path")
+    parent = destination.parent
+    if not parent.is_dir():
+        raise ForgeError("Destination directory does not exist")
+    _reject_symlink_chain(parent)
     return destination
 
 
+def _session_directory(store, value):
+    """Existing project directory holding one new window-NN.pcap per window."""
+    relative = _local_path(value, "Provide an existing project directory --path when --repeat is greater than 1")
+    directory = _in_project(store, relative)
+    if not directory.is_dir():
+        raise ForgeError("--path must be an existing project directory when --repeat is greater than 1")
+    _reject_symlink_chain(directory)
+    return directory
+
+
+def _window_destination(directory, index):
+    name = f"window-{index:02d}.pcap"
+    if not WINDOW_FILE.fullmatch(name):
+        raise ForgeError("Window capture files must stay window-NN.pcap")
+    destination = directory / name
+    if destination.exists() or destination.is_symlink():
+        raise ForgeError(f"Window destination {name} already exists; each capture window requires a new file")
+    return destination
+
+
+def _destinations(store, value, repeat):
+    """Every destination is validated before any device call."""
+    if repeat > 1:
+        directory = _session_directory(store, value)
+        return [_window_destination(directory, index) for index in range(1, repeat + 1)]
+    return [_new_destination(store, value)]
+
+
 def _settings(name, options, environment):
-    return {"root_capture": False, "tls_decryption": False, "socks5_enabled": False, "pcapng_format": False,
-            "block_quic": "never", "auto_block_private_dns": False, "dump_extensions": True, "ip_mode": "both",
-            "pcap_dump_mode": "pcap_file", "app_filter": options["package"], "pcap_name": name, "full_payload": True,
-            "snaplen": SNAPLEN, "max_dump_size": options["max_bytes"], "api_env_variable": environment,
-            "key_supplied": environment is not None}
+    settings = {"root_capture": False, "tls_decryption": False, "socks5_enabled": False, "pcapng_format": False,
+                "block_quic": "never", "auto_block_private_dns": False, "dump_extensions": True, "ip_mode": "both",
+                "pcap_dump_mode": "pcap_file", "app_filter": options["package"], "pcap_name": name,
+                "full_payload": True, "snaplen": SNAPLEN, "max_dump_size": options["max_bytes"],
+                "api_env_variable": environment, "key_supplied": environment is not None}
+    if options["tls_decryption"]:
+        settings["tls_decryption"] = True
+        settings["block_quic"] = "to_decrypt"
+        settings["decryption_rules"] = json.dumps([{"type": "APP", "value": options["package"]}],
+                                                  separators=(",", ":"))
+    return settings
 
 
 def _capture_name():
@@ -415,10 +507,15 @@ def _dispatch_command(command, key):
 
 def _start_command(adb, serial, options, name, key):
     settings = _settings(name, options, None)
+    names = ["pcap_dump_mode", "pcap_name", "app_filter", "root_capture", "tls_decryption", "socks5_enabled",
+             "pcapng_format", "block_quic", "auto_block_private_dns", "dump_extensions", "ip_mode", "full_payload",
+             "snaplen", "max_dump_size"]
     extras = [(extra, str(settings[extra]).lower() if isinstance(settings[extra], bool) else str(settings[extra]))
-              for extra in ("pcap_dump_mode", "pcap_name", "app_filter", "root_capture", "tls_decryption",
-                            "socks5_enabled", "pcapng_format", "block_quic", "auto_block_private_dns",
-                            "dump_extensions", "ip_mode", "full_payload", "snaplen", "max_dump_size")]
+              for extra in names]
+    if settings.get("decryption_rules"):
+        # `adb shell` re-joins argv into one remote shell line, so the JSON value needs the
+        # quoting the device shell strips again; unquoted JSON arrives stripped of its quotes.
+        extras.append(("decryption_rules", shlex.quote(settings["decryption_rules"])))
     return _intent_command(adb, serial, "start", key, extras)
 
 
@@ -649,22 +746,111 @@ def pcapdroid_preflight(args, store):
     return store.add("runtime", _preflight(_serial_value(getattr(args, "serial", None), "--serial"), package))
 
 
-def pcapdroid_capture(args, store):
-    forge_tasks.check_scope(store, "pcapdroid-capture", device=True, network=True)
-    options = _capture_options(args)
-    destination = _new_destination(store, getattr(args, "path", None))
-    key, environment = _api_key(getattr(args, "api_key_env", None))
-    secrets = (key, shlex.quote(key)) if key is not None else ()
+def _gap(seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
+def _action_dispatch(label, command, options, secrets):
+    """Dispatch one scripted app action; acceptance stays a dispatch observation."""
+    dispatch = _dispatch(_run(command, options["timeout"]), secrets)
+    dispatch["action"] = label
+    dispatch["command"] = list(command)
+    return dispatch
+
+
+def _scripted_actions(adb, serial, options, secrets):
+    """Send the configured per-window app actions: force-stop of the target package first, then the launch."""
+    force_stop = launch = None
+    if options["force_stop"]:
+        force_stop = _action_dispatch("force-stop", [adb, "-s", serial, "shell", "am", "force-stop",
+                                                     options["package"]], options, secrets)
+    if options["launch"]:
+        launch = _action_dispatch("launch", [adb, "-s", serial, "shell", "am", "start", "-W", "-n",
+                                            options["launch"]], options, secrets)
+    return force_stop, launch
+
+
+def _action_error(force_stop, launch):
+    for label, dispatch in (("force-stop", force_stop), ("launch", launch)):
+        if dispatch is not None and not dispatch["accepted"]:
+            return f"The scripted {label} action was not dispatched: {dispatch['reason']}"
+    return None
+
+
+def _stop_code(stop):
+    """Compact stop outcome for session summaries; the window record keeps the full structure."""
+    if not isinstance(stop, dict) or not stop.get("requested"):
+        return "not-requested"
+    return stop.get("state") or "unknown"
+
+
+def _window_summary(store, index, destination, *, attempted, success, name=None, evidence_id=None, sha256=None,
+                    size=None, empty=None, error=None, stop_state=None):
+    return {"index": index, "path": _project_relative(store, destination), "pcap_name": name, "attempted": attempted,
+            "success": success, "evidence_id": evidence_id, "sha256": sha256, "size": size, "empty": empty,
+            "error": error, "stop_state": stop_state}
+
+
+def _window_failure(store, options, environment, secrets, index, count, destination, preflight_id, error, name=None,
+                    remote=None, settings=None, dispatch=None, start=None, stop=None, window_end=None, dump=None,
+                    force_stop=None, launch=None, precheck=None):
+    """Store the per-window rejection first, so a mid-session stop keeps the completed windows intact."""
+    message = scrub_text(str(error), secrets)
+    required = _required_action(dispatch, start, stop, dump)
+    decryption = options["tls_decryption"]
+    record = store.add("runtime", {
+        "schema": SCHEMA, "tool": TOOL, "action": "capture-rejected", "success": False, "error": message,
+        "package": options["package"], "serial": options["serial"], "pcap_name": name, "device_path": remote,
+        "settings": settings if settings is not None else _settings(None, options, environment),
+        "window_index": index, "window_count": count,
+        "destination": str(destination), "destination_published": False,
+        "dispatch": dispatch, "start": start, "stop": stop, "window_end": window_end, "dump": dump,
+        "force_stop_action": force_stop, "launch_action": launch, "service_precheck": precheck,
+        "retrieval": {"pulled": False, "published": False}, "preflight_evidence_id": preflight_id,
+        "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
+        "decryption_scope": _DECRYPTION_SCOPE if decryption else None,
+        "proof": {"activity_result_available": False, "get_status_extras_used": False},
+        "required_action": required, "scope": _SCOPE, "limits": _limits(options)})
+    summary = _window_summary(store, index, destination, attempted=True, success=False, name=name,
+                             evidence_id=record["id"], error=message, stop_state=_stop_code(stop))
+    return {"record": None, "summary": summary, "message": message, "error": error,
+            "failure": {"index": index, "path": summary["path"], "pcap_name": name, "error": message,
+                        "evidence_id": record["id"], "required_action": required}}
+
+
+def _capture_window(store, options, facts, preflight_id, key, secrets, environment, index, count, destination):
+    """Run one bounded window: observed start, scripted app actions, bounded window, observed stop, retrieval.
+
+    The window outcome never decides the session outcome, and any capture this window started is stopped before
+    the outcome is returned. A failure stores its own rejection record with whatever this window observed.
+    """
+    adb, serial = facts["adb_path"], facts["device"]["serial"]
     name = _capture_name()
     remote = DEVICE_DIRECTORY + "/" + name
     settings = _settings(name, options, environment)
-    facts = preflight = dispatch = start = stop = window_end = dump = None
+    prefix = f"window {index}/{count}: " if count > 1 else ""
+    dispatch = start = stop = window_end = dump = precheck = force_stop = launch = None
+
+    def reject(error):
+        return _window_failure(store, options, environment, secrets, index, count, destination, preflight_id, error,
+                               name=name, remote=remote, settings=settings, dispatch=dispatch, start=start, stop=stop,
+                               window_end=window_end, dump=dump, force_stop=force_stop, launch=launch,
+                               precheck=precheck)
+
     try:
-        facts = _preflight(options["serial"], options["package"])
-        preflight = store.add("runtime", facts)
-        if facts["status"] != "ready":
-            raise ForgeError(f"Capture prerequisite missing: {facts['status']}; evidence {preflight['id']}")
-        adb, serial = facts["adb_path"], facts["device"]["serial"]
+        if index > 1:
+            # Every window re-checks that no CaptureService is running; a foreign capture is never stopped.
+            precheck = _service_call(adb, serial, options["timeout"])
+            status = (None if precheck["known"] and precheck["running"] is False
+                      else ("capture-active" if precheck["running"] else "service-unknown"))
+            if status is not None:
+                raise ForgeError(f"Capture prerequisite missing: {status}")
+        print(f"forge pcapdroid-capture: {prefix}starting {name}", file=sys.stderr, flush=True)
         command = _start_command(adb, serial, options, name, key)
         try:
             dispatch = _dispatch(_run(_dispatch_command(command, key), options["timeout"]), secrets)
@@ -673,7 +859,11 @@ def pcapdroid_capture(args, store):
             start = _await_start(adb, serial, remote, options)
             if not start["observed"]:
                 raise ForgeError("Both the capture service and this session's dump file were not observed within the consent timeout")
-            print(_ready_message(options, start), file=sys.stderr, flush=True)
+            print(_ready_message(options, start, index, count), file=sys.stderr, flush=True)
+            force_stop, launch = _scripted_actions(adb, serial, options, secrets)
+            problem = _action_error(force_stop, launch)
+            if problem is not None:
+                raise ForgeError(problem)
             _window(options["seconds"])
             window_end = _observe(adb, serial, remote, options["timeout"])
         finally:
@@ -695,27 +885,31 @@ def pcapdroid_capture(args, store):
         if not flushed:
             raise ForgeError("Capture dump size was not stable after stop; nothing was published")
         retrieval = _retrieve(adb, serial, remote, destination, options, after_stop["size"])
-        device_size = after_stop["size"]
-        print(f"forge pcapdroid-capture: capture stopped and {retrieval['size']} bytes retrieved as "
+        print(f"forge pcapdroid-capture: {prefix}capture stopped and {retrieval['size']} bytes retrieved as "
               f"{destination.name}", file=sys.stderr, flush=True)
+        decryption = options["tls_decryption"]
         record = store.add("runtime", {
             "schema": SCHEMA, "tool": TOOL, "action": "capture", "success": True,
             "serial": serial, "package": options["package"], "target_uid": _target_uid(facts),
+            "window_index": index, "window_count": count,
             "capture": {"path": _project_relative(store, destination),
                         "sha256": retrieval["sha256"], "size": retrieval["size"]},
             "empty": retrieval["empty"],
             "pcap_header": retrieval["header"], "settings": settings,
             "device": {"serial": serial, "adb_path": adb,
                        "capture_package": facts["capture_package"], "target_package": facts["target_package"],
-                       "device_path": remote, "device_size": device_size, "size_stable_after_stop": flushed},
+                       "device_path": remote, "device_size": after_stop["size"], "size_stable_after_stop": flushed},
             "dispatch": dispatch,
             "dispatch_command": list(command),
             "start": start, "stop": stop, "window_end": window_end,
-            "retrieval": {"pulled": True, "published": True, "device_size": device_size,
+            "force_stop_action": force_stop, "launch_action": launch,
+            "retrieval": {"pulled": True, "published": True, "device_size": after_stop["size"],
                           "size": retrieval["size"], "sha256": retrieval["sha256"],
                           "max_dump_size_reached": retrieval["max_dump_size_reached"]},
             "max_dump_size_reached": retrieval["max_dump_size_reached"],
             "dump_size_stable_after_stop": flushed,
+            "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
+            "decryption_scope": _DECRYPTION_SCOPE if decryption else None,
             "proof": {"dispatch_observed": True, "service_running_observed": start["service_running"],
                       "file_created_observed": start["file_created"],
                       "file_header_observed": start["file_header_observed"],
@@ -726,21 +920,84 @@ def pcapdroid_capture(args, store):
                       "retrieved_header_valid": True,
                       "activity_result_available": False, "get_status_extras_used": False,
                       "empty_capture": retrieval["empty"]},
-            "preflight_evidence_id": preflight["id"], "evidence_ids": [preflight["id"]],
-            "scope": _SCOPE, "limits": _LIMITS})
-        return record
+            "preflight_evidence_id": preflight_id, "evidence_ids": [preflight_id],
+            "scope": _SCOPE, "limits": _limits(options)})
     except (ForgeError, OSError, ValueError, sqlite3.Error) as error:
-        message = scrub_text(str(error), secrets)
-        failure = store.add("runtime", {
-            "schema": SCHEMA, "tool": TOOL, "action": "capture-rejected", "success": False, "error": message,
-            "package": options["package"], "serial": options["serial"], "pcap_name": name, "device_path": remote,
-            "settings": settings, "destination": str(destination), "destination_published": False,
-            "dispatch": dispatch, "start": start, "stop": stop, "window_end": window_end, "dump": dump,
-            "retrieval": {"pulled": False, "published": False},
-            "preflight_evidence_id": preflight["id"] if preflight else None,
-            "proof": {"activity_result_available": False, "get_status_extras_used": False},
-            "required_action": _required_action(dispatch, start, stop, dump), "scope": _SCOPE, "limits": _LIMITS})
-        raise ForgeError(f"{message}; rejection evidence {failure['id']}") from error
+        return reject(error)
+    return {"record": record,
+            "summary": _window_summary(store, index, destination, attempted=True, success=True, name=name,
+                                       evidence_id=record["id"], sha256=retrieval["sha256"],
+                                       size=retrieval["size"], empty=retrieval["empty"],
+                                       stop_state=_stop_code(stop)),
+            "failure": None, "error": None, "message": None}
+
+
+def _session_data(store, options, environment, facts, preflight_id, destination, windows, failures, observed):
+    decryption = options["tls_decryption"]
+    serial = facts["device"]["serial"] if isinstance(facts.get("device"), dict) else options["serial"]
+    running = observed["running"] if isinstance(observed, dict) and observed.get("known") else None
+    return {"schema": SCHEMA, "tool": TOOL, "action": "capture-session",
+            "success": not failures and bool(windows) and all(entry["success"] for entry in windows),
+            "package": options["package"], "serial": serial, "target_uid": _target_uid(facts),
+            "repeats": options["repeat"], "attempted_windows": sum(1 for entry in windows if entry["attempted"]),
+            "completed_windows": sum(1 for entry in windows if entry["success"]),
+            "seconds": options["seconds"], "gap_seconds": options["gap"], "max_bytes": options["max_bytes"],
+            "force_stop": options["force_stop"], "launch": options["launch"],
+            "destination": _project_relative(store, destination), "settings": _settings(None, options, environment),
+            "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
+            "decryption_scope": _DECRYPTION_SCOPE if decryption else None,
+            "windows": windows, "failures": failures, "service_after_session": observed,
+            "capture_running_after_session": running, "preflight_evidence_id": preflight_id,
+            "evidence_ids": [preflight_id] + [entry["evidence_id"] for entry in windows if entry["evidence_id"]],
+            "required_action": failures[0]["required_action"] if failures else None,
+            "scope": _SCOPE, "limits": _limits(options)}
+
+
+def pcapdroid_capture(args, store):
+    forge_tasks.check_scope(store, "pcapdroid-capture", device=True, network=True)
+    options = _capture_options(args)
+    destinations = _destinations(store, getattr(args, "path", None), options["repeat"])
+    key, environment = _api_key(getattr(args, "api_key_env", None))
+    secrets = (key, shlex.quote(key)) if key is not None else ()
+    count = len(destinations)
+    windows, failures, failed, completed = [], [], None, None
+    facts = _preflight(options["serial"], options["package"])
+    preflight = store.add("runtime", facts)
+    adb = facts.get("adb_path")
+    serial = facts["device"]["serial"] if isinstance(facts.get("device"), dict) else None
+    try:
+        if facts["status"] != "ready":
+            raise ForgeError(f"Capture prerequisite missing: {facts['status']}")
+        for index, destination in enumerate(destinations, start=1):
+            if index > 1:
+                _gap(options["gap"])
+            outcome = _capture_window(store, options, facts, preflight["id"], key, secrets, environment, index,
+                                      count, destination)
+            windows.append(outcome["summary"])
+            if outcome["error"] is None:
+                completed = outcome["record"]
+                continue
+            failures.append(outcome["failure"])
+            failed = outcome
+            break
+    except (ForgeError, OSError, ValueError, sqlite3.Error) as error:
+        # Only a session-level refusal reaches here: window failures record themselves and end the loop.
+        failed = _window_failure(store, options, environment, secrets, len(windows) + 1, count,
+                                 destinations[len(windows)], preflight["id"], error)
+        windows.append(failed["summary"])
+        failures.append(failed["failure"])
+    attempted = len(windows)
+    windows += [_window_summary(store, index, destination, attempted=False, success=False)
+                for index, destination in enumerate(destinations[attempted:], start=attempted + 1)]
+    observed = _service_call(adb, serial, options["timeout"]) if attempted and adb and serial else None
+    session = store.add("runtime", _session_data(store, options, environment, facts, preflight["id"],
+                                                 destinations[0].parent if count > 1 else destinations[0],
+                                                 windows, failures, observed))
+    if failed is not None:
+        window = f"window {attempted}/{count} " if count > 1 else ""
+        raise ForgeError(f"{failed['message']}; {window}rejection evidence {failed['failure']['evidence_id']}; "
+                         f"capture-session evidence {session['id']}") from failed["error"]
+    return completed if count == 1 else session
 
 
 def _project_relative(store, destination):
@@ -750,14 +1007,15 @@ def _project_relative(store, destination):
         return None
 
 
-def _ready_message(options, start):
+def _ready_message(options, start, index=1, count=1):
     detail = (f"dump file created ({start['file_size']} bytes so far)" if start["file_created"]
               else "dump file not observed yet")
+    prefix = f"window {index}/{count}: " if count > 1 else ""
     if start["complete"]:
-        return (f"forge pcapdroid-capture: capture service running and {detail} for {options['package']}; "
+        return (f"forge pcapdroid-capture: {prefix}capture service running and {detail} for {options['package']}; "
                 f"perform the target action now ({options['seconds']}s)")
-    return (f"forge pcapdroid-capture: {detail} for {options['package']} but the capture service was not observed "
-            f"running yet; perform the target action now ({options['seconds']}s)")
+    return (f"forge pcapdroid-capture: {prefix}{detail} for {options['package']} but the capture service was not "
+            f"observed running yet; perform the target action now ({options['seconds']}s)")
 
 
 def register(subparsers):
@@ -769,14 +1027,29 @@ def register(subparsers):
     parser.set_defaults(handler=pcapdroid_preflight)
     parser = subparsers.add_parser("pcapdroid-capture",
                                    help="Start one bounded app-filtered rootless PCAPdroid capture and retrieve the "
-                                        "new private PCAP file after an observed stop")
+                                        "new private PCAP file after an observed stop; --repeat runs several scripted "
+                                        "windows with one evidence record each")
     parser.add_argument("--package", required=True, help="Target app package to capture, for example ai.x.grok")
-    parser.add_argument("--path", required=True, help="New local destination for the retrieved PCAP file")
+    parser.add_argument("--path", required=True,
+                        help="New local destination for the retrieved PCAP file, or an existing project directory "
+                             "when --repeat is greater than 1 (each window writes window-NN.pcap)")
     parser.add_argument("--serial", help="Explicit ADB serial when device selection is ambiguous")
     parser.add_argument("--seconds", type=int, default=15,
                         help=f"Bounded capture window in seconds (1..{MAX_SECONDS}, default: 15)")
     parser.add_argument("--consent-timeout", type=int, default=30,
                         help=f"Seconds to wait for the capture start observation (1..{MAX_CONSENT_SECONDS}, default: 30)")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help=f"Scripted capture windows in one session (1..{MAX_REPEATS}, default: 1); each window "
+                             f"writes its own window-NN.pcap and evidence record")
+    parser.add_argument("--gap", type=float, default=0,
+                        help=f"Seconds between capture windows (0..{MAX_GAP_SECONDS}, default: 0)")
+    parser.add_argument("--launch", help="Optional PACKAGE/COMPONENT to launch in every window after the capture "
+                                         "starts, for example ai.x.grok/.MainActivity")
+    parser.add_argument("--force-stop", action="store_true",
+                        help="Force-stop the target package before each window's launch")
+    parser.add_argument("--tls-decryption", action="store_true",
+                        help="Request PCAPdroid TLS decryption for the target package; needs a user-installed "
+                             "PCAPdroid CA and app trust, and FORGE installs nothing")
     parser.add_argument("--api-key-env",
                         help="Environment variable holding the PCAPdroid API key; the key is never stored or echoed")
     parser.add_argument("--max-bytes", type=int, default=33554432,

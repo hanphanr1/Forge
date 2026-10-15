@@ -124,6 +124,33 @@ authenticated call. A zero-length or headerless dump is a start observation, nev
 The raw PCAP stays local and may contain private data. This path needs no root, no certificate install, no
 pinning bypass, no app re-signing and no emulator.
 
+### Opt-in decryption and scripted windows
+
+`pcapdroid-capture --tls-decryption` asks PCAPdroid for its own decryption mode scoped to the target app
+(`decryption_rules` APP rule, `block_quic to_decrypt`). FORGE installs no CA, adds no trust anchor and edits no
+app preference: without the operator-installed PCAPdroid CA, without app trust, or with certificate pinning the
+flows stay encrypted. The request is recorded (`decryption_requested`, `operator_approved_tls_decryption`,
+`decryption_scope`) and never claimed as performed; `pcap-analyze` computes `decryption_performed` from the
+cited request plus decoded request lines, so a still-encrypted capture stays honestly `false`.
+
+`--repeat N --gap SECONDS [--launch PACKAGE/ACTIVITY] [--force-stop]` runs several bounded windows in one
+session: per window a scoped service precheck, a unique dump, optional `am force-stop` + `am start -W -n`, the
+bounded window, an observed stop and a hash-verified pull to `window-NN.pcap` in an existing project directory.
+Each window gets its own evidence record, and one `capture-session` record lists every window, failure and the
+post-session service observation. A window failure stops further windows while completed files and records stay
+intact.
+
+### Cross-file caller candidates
+
+`android-caller-map --jadx-evidence ID --method NAME [--class OWNER]` answers "who calls this method name
+anywhere in the tree": bare calls list possible owner classes from that file's imports and same-package classes,
+receivers are classified (`this`, owner class, named, expression, constructor), declarations and annotations are
+skipped, and `--class` keeps only candidates attributable to one owner. These are name candidates, not a
+resolved call graph: overloads, inheritance, reflection and generated call sites are not resolved, and caps are
+reported. On the 23,387-file Grok tree, `--method a --class e5.c --max-files 5000` scanned 5,000 files in 58
+seconds and kept 39 bare + 11 owner-class candidates, with `truncated: true` because the file cap stopped the
+walk — raise the caps before treating absence as evidence.
+
 ## Install a selected APK set
 
 Use only APKs you own or are authorized to install on the selected device. The package must not already be installed under this command's new-install policy.

@@ -215,9 +215,10 @@ def parser():
     import forge_bundle
     import forge_pcap
     import forge_pcapdroid
+    import forge_callers
     for module in (forge_tasks, forge_artifacts, forge_network, forge_runtime, forge_har, forge_execution, forge_protocol,
                    forge_comparisons, forge_graphql, forge_android, forge_apktool, forge_ios, forge_retention,
-                   forge_capture, forge_bundle, forge_pcap, forge_pcapdroid):
+                   forge_capture, forge_bundle, forge_pcap, forge_pcapdroid, forge_callers):
         module.register(commands)
     return cli
 

@@ -12,6 +12,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_core import EvidenceStore, ForgeError
 import forge_pcap
+import forge_protocol
 
 
 # ---------------------------------------------------------------- builders
@@ -178,6 +179,19 @@ class PcapTests(unittest.TestCase):
     def dns_packet(self, name, *, source="10.0.0.5", server="8.8.8.8", payload=None, seconds=1700000000):
         message = dns_query(name) if payload is None else payload
         return pcap_record(frame(ipv4(source, server, 17, udp(40000, 53, message))), seconds=seconds)
+
+    def http_packet(self, payload, *, source_port=51000, server="93.184.216.34", seconds=1700000000):
+        """One plaintext HTTP request in its own direction flow, so every line is probed."""
+        return pcap_record(frame(ipv4("10.0.0.5", server, 6, tcp(source_port, 80, payload, flags=0x18))),
+                           seconds=seconds)
+
+    def analysis_record(self, name="capture.pcap", *extra):
+        args = self.parser.parse_args(["pcap-analyze", name, *extra])
+        return args.handler(args, self.store)
+
+    def protocol_map(self, record):
+        return forge_protocol.protocol_map(argparse.Namespace(evidence=[record["id"]], limit=100,
+                                                             max_endpoints=200), self.store)
 
     # ------------------------------------------------------------ framing
 
@@ -485,17 +499,76 @@ class PcapTests(unittest.TestCase):
         self.assertTrue(data["hosts"][0]["observations"][0]["ech"])
 
     def test_plaintext_http_host_is_extracted_only_from_the_head(self):
-        packets = [pcap_record(frame(ipv4("10.0.0.5", "93.184.216.34", 6,
-                                          tcp(51000, 80, http_request("plain.example.com"), flags=0x18))))]
+        packets = [self.http_packet(http_request("plain.example.com"))]
         self.write("capture.pcap", pcap(packets))
         data = self.analyze()
         self.assertEqual([entry["hostname"] for entry in data["hosts"]], ["plain.example.com"])
         self.assertEqual(data["hosts"][0]["observations"][0]["kind"], "http_host")
         self.assertEqual(data["http_requests"], 1)
         self.assertEqual(data["http_hosts"], 1)
+        self.assertEqual(data["http_request_lines"], 1)
+        self.assertEqual(data["hosts"][0]["http_methods"], ["POST"])
+        self.assertEqual(data["hosts"][0]["http_paths"], ["/private/path"])
         dumped = json.dumps(data)
-        for leaked in ("/private/path", "token=secret", "hunter2", "Content-Length", "User-Agent", "HTTP/1.1"):
+        # The request line's method and origin-form path are reported; its query value, its other
+        # headers and its body are never read, so none of them may appear.
+        for leaked in ("token=secret", "hunter2", "Content-Length", "User-Agent", "HTTP/1.1"):
             self.assertNotIn(leaked, dumped)
+
+    def test_request_line_query_values_and_bodies_never_reach_the_output(self):
+        packets = [self.http_packet(http_request("query.example.com", method="POST",
+                                                 target="/api/v1/items?token=private-query-value&mode=owned")),
+                   self.http_packet(http_request("query.example.com", method="GET",
+                                                 target="/api/v1/items/7?view=private-view-value"),
+                                    source_port=51001, seconds=1700000001)]
+        self.write("capture.pcap", pcap(packets))
+        data = self.analyze()
+        self.assertEqual(data["hosts"][0]["hostname"], "query.example.com")
+        self.assertEqual(data["hosts"][0]["http_methods"], ["POST", "GET"])
+        self.assertEqual(data["hosts"][0]["http_paths"], ["/api/v1/items", "/api/v1/items/7"])
+        self.assertEqual(data["http_request_lines"], 2)
+        self.assertFalse(data["hosts"][0]["http_methods_omitted"])
+        self.assertFalse(data["hosts"][0]["http_paths_omitted"])
+        dumped = json.dumps(data)
+        for leaked in ("private-query-value", "private-view-value", "token=", "view="):
+            self.assertNotIn(leaked, dumped)
+
+    def test_request_line_caps_report_omitted_methods_and_paths(self):
+        methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "PURGE", "MKCOL"]
+        self.assertGreater(len(methods), forge_pcap.HTTP_VALUES_PER_HOST)
+        packets = [self.http_packet(http_request("capped.example.com", method=method, target=f"/item/{index}"),
+                                    source_port=51000 + index, seconds=1700000000 + index)
+                   for index, method in enumerate(methods)]
+        self.write("capture.pcap", pcap(packets))
+        data = self.analyze()
+        entry = data["hosts"][0]
+        self.assertEqual(entry["http_methods"], methods[:forge_pcap.HTTP_VALUES_PER_HOST])
+        self.assertEqual(entry["http_paths"], [f"/item/{index}" for index in range(forge_pcap.HTTP_VALUES_PER_HOST)])
+        self.assertTrue(entry["http_methods_omitted"])
+        self.assertTrue(entry["http_paths_omitted"])
+        self.assertEqual(data["http_request_lines"], len(methods))
+        self.assertEqual(data["limits"]["http_values_per_host"], forge_pcap.HTTP_VALUES_PER_HOST)
+        self.assertTrue(data["truncated"])
+
+    def test_request_line_metadata_requires_a_host_and_an_origin_form_target(self):
+        packets = [self.http_packet(b"OPTIONS * HTTP/1.1\r\nHost: star.example.com\r\n\r\n"),
+                   self.http_packet(b"GET http://absolute.example.com/x HTTP/1.1\r\nHost: abs.example.com\r\n\r\n",
+                                    source_port=51001, seconds=1700000001),
+                   self.http_packet(b"GET /origin/form HTTP/1.1\r\nHost: dot.example.com\r\n\r\n",
+                                    source_port=51002, seconds=1700000002)]
+        self.write("capture.pcap", pcap(packets))
+        data = self.analyze()
+        hosts = {entry["hostname"]: entry for entry in data["hosts"]}
+        self.assertEqual(sorted(hosts), ["abs.example.com", "dot.example.com", "star.example.com"])
+        # Asterisk and absolute forms have no origin-form path: no method and no path are claimed.
+        for name in ("abs.example.com", "star.example.com"):
+            self.assertNotIn("http_methods", hosts[name])
+            self.assertNotIn("http_paths", hosts[name])
+        self.assertEqual(hosts["dot.example.com"]["http_methods"], ["GET"])
+        self.assertEqual(hosts["dot.example.com"]["http_paths"], ["/origin/form"])
+        self.assertEqual(data["http_requests"], 3)
+        self.assertEqual(data["http_request_lines"], 1)
+        self.assertNotIn("absolute.example.com/x", json.dumps(data))
 
     def test_http_head_without_host_header_yields_no_name(self):
         request = b"GET /private HTTP/1.0\r\nUser-Agent: forge\r\n\r\n"
@@ -504,6 +577,7 @@ class PcapTests(unittest.TestCase):
         data = self.analyze()
         self.assertEqual(data["http_requests"], 1)
         self.assertEqual(data["http_hosts"], 0)
+        self.assertEqual(data["http_request_lines"], 1)
         self.assertEqual(data["hosts"], [])
         self.assertNotIn("/private", json.dumps(data))
 
@@ -808,6 +882,91 @@ class PcapTests(unittest.TestCase):
         data = self.analyze("capture.pcap", "--capture-evidence", capture["id"])
         self.assertIsNone(data["capture"]["target_uid"])
         self.assertNotIn("uid_attribution", data)
+
+    def test_decryption_performed_truth_table(self):
+        plaintext = [self.http_packet(http_request("decrypted.example.com", method="GET", target="/v1/items"))]
+        self.write("capture.pcap", pcap(plaintext))
+
+        # No cited capture: the key stays false and no basis is invented.
+        data = self.analyze()
+        self.assertFalse(data["decryption_performed"])
+        self.assertNotIn("decryption_basis", data)
+
+        # A cited capture that never asked for TLS decryption: decoded lines were plaintext.
+        silent = self.capture_evidence()
+        data = self.analyze("capture.pcap", "--capture-evidence", silent["id"])
+        self.assertFalse(data["decryption_performed"])
+        self.assertFalse(data["capture"]["decryption_requested"])
+        self.assertEqual(data["decryption_basis"],
+                         {"decryption_requested": False, "http_request_lines": 1,
+                          "rule": forge_pcap.DECRYPTION_RULE})
+
+        for declaration in ({"decryption_requested": True}, {"settings": {"tls_decryption": True}},
+                            {"settings": {"tls_decryption": "true"}}):
+            with self.subTest(declaration=sorted(declaration)):
+                asking = self.capture_evidence(**declaration)
+                data = self.analyze("capture.pcap", "--capture-evidence", asking["id"])
+                self.assertTrue(data["capture"]["decryption_requested"])
+                self.assertTrue(data["decryption_performed"])
+                self.assertEqual(data["decryption_basis"]["http_request_lines"], 1)
+
+        # A capture that asked for decryption but holds no decoded request line proves nothing.
+        hello = frame(ipv4("10.0.0.5", "93.184.216.34", 6, tcp(51000, 443, client_hello("pinned.example.com"))))
+        self.write("capture.pcap", pcap([pcap_record(hello)]))
+        asking = self.capture_evidence(decryption_requested=True)
+        data = self.analyze("capture.pcap", "--capture-evidence", asking["id"])
+        self.assertEqual(data["http_request_lines"], 0)
+        self.assertFalse(data["decryption_performed"])
+        self.assertEqual(data["decryption_basis"],
+                         {"decryption_requested": True, "http_request_lines": 0,
+                          "rule": forge_pcap.DECRYPTION_RULE})
+
+    # ------------------------------------------------------------ protocol map
+
+    def test_protocol_map_copies_request_lines_without_creating_url_identities(self):
+        self.write("capture.pcap", pcap([
+            self.http_packet(http_request("api.example.com", method="GET",
+                                          target="/api/v1/items?token=private-query-value"))]))
+        record = self.analysis_record()
+        result = self.protocol_map(record)
+        self.assertEqual([endpoint["host"] for endpoint in result["endpoints"]], ["api.example.com"])
+        endpoint = result["endpoints"][0]
+        self.assertNotIn("url", endpoint)
+        self.assertNotIn("method", endpoint)
+        self.assertEqual(len(endpoint["observations"]), 1)
+        observation = endpoint["observations"][0]
+        self.assertEqual(observation["category"], "captured_network")
+        self.assertEqual(observation["http_methods"], ["GET"])
+        self.assertEqual(observation["http_paths"], ["/api/v1/items"])
+        self.assertIn("not a successful call", observation["note"])
+        self.assertFalse(result["input_truncated"])
+        self.assertEqual(result["limits"]["http_values_per_host"], forge_protocol.MAX_NETWORK_HTTP_VALUES)
+        dumped = json.dumps(result)
+        for leaked in ("private-query-value", "captured_http"):
+            self.assertNotIn(leaked, dumped)
+
+    def test_protocol_map_bounds_stored_request_line_values(self):
+        wide = self.store.add("analysis", {
+            "schema": "forge.pcap/v1", "tool": "pcap", "action": "pcap-analyze", "success": True,
+            "category": "captured_network", "http_request_lines": 12,
+            "hosts": [{"hostname": "wide.example", "observations": [{"kind": "http_host", "timestamp": 1.0}],
+                       "http_methods": [f"M{index}" for index in range(12)],
+                       "http_paths": [f"/p{index}" for index in range(12)]}]})
+        result = self.protocol_map(wide)
+        observation = result["endpoints"][0]["observations"][0]
+        self.assertEqual(len(observation["http_methods"]), forge_protocol.MAX_NETWORK_HTTP_VALUES)
+        self.assertEqual(len(observation["http_paths"]), forge_protocol.MAX_NETWORK_HTTP_VALUES)
+        self.assertTrue(result["input_truncated"])
+        unusable = self.store.add("analysis", {
+            "schema": "forge.pcap/v1", "tool": "pcap", "action": "pcap-analyze", "success": True,
+            "category": "captured_network",
+            "hosts": [{"hostname": "unusable.example", "observations": [{"kind": "http_host"}],
+                       "http_paths": ["/ok", 7, ""]}]})
+        result = self.protocol_map(unusable)
+        observation = result["endpoints"][0]["observations"][0]
+        self.assertEqual(observation["http_paths"], ["/ok"])
+        self.assertNotIn("http_methods", observation)
+        self.assertTrue(result["input_truncated"])
 
     def test_map_citation_matches_exact_hostnames_only(self):
         self.write("capture.pcap", pcap([self.dns_packet("api.example.com"),

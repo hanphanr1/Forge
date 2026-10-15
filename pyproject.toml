@@ -42,6 +42,7 @@ py-modules = [
     "forge_toolchain", "forge_tasks", "forge_version", "forge_har", "forge_execution", "forge_protocol",
     "forge_comparisons", "forge_graphql", "forge_native", "forge_android", "forge_apktool", "forge_ios",
     "forge_retention", "forge_capture", "forge_bundle", "forge_java_trace", "forge_pcap", "forge_pcapdroid",
+    "forge_callers",
 ]
 
 [tool.setuptools.dynamic]

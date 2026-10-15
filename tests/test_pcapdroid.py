@@ -18,6 +18,8 @@ from forge_core import EvidenceStore, ForgeError
 
 SERIAL = "b519558f"
 PACKAGE = "ai.x.grok"
+LAUNCH = "ai.x.grok/.MainActivity"
+SESSION_PATH = "captures/session"
 PCAP_HEADER = b"\xd4\xc3\xb2\xa1" + b"\x02\x00\x04\x00" + b"\x00" * 8 + b"\x00\x08\x00\x00" + b"\x01\x00\x00\x00"
 
 
@@ -50,7 +52,7 @@ class Device:
     def __init__(self, *, installed=True, target_installed=True, capture_running=False, consent=True,
                  stop_works=True, header_valid=True, payload=b"", truncate_service=False, start_error=False,
                  device_size=None, create_file=True, defer_data=False, truncate_package=False, am_echo="",
-                 devices=None, adb="configured-adb"):
+                 devices=None, adb="configured-adb", launch_error=False, force_stop_error=False):
         self.adb = adb
         self.installed = installed
         self.target_installed = target_installed
@@ -66,10 +68,14 @@ class Device:
         self.create_file = create_file
         self.defer_data = defer_data
         self.am_echo = am_echo
+        self.launch_error = launch_error
+        self.force_stop_error = force_stop_error
         self.devices = [{"serial": SERIAL, "state": "device"}] if devices is None else devices
         self.file = None
         self.remote_path = None
         self.commands = []
+        self.launched = []
+        self.force_stopped = []
 
     # -- command dispatch -------------------------------------------------
     def __call__(self, command, timeout, binary=False):
@@ -96,6 +102,10 @@ class Device:
 
     def stop_commands(self):
         return [command for command in self.am_commands() if "stop" in command]
+
+    def start_commands(self):
+        return [command for command in self.am_commands()
+                if "action" in command and command[command.index("action") + 1] == "start"]
 
     def shell(self, rest):
         if rest[:2] == ["pm", "path"]:
@@ -165,6 +175,21 @@ class Device:
         return call_result("(nothing)\n")
 
     def am(self, rest):
+        if rest[:1] == ["force-stop"]:
+            if len(rest) != 2:
+                raise AssertionError(f"unexpected force-stop command: {rest}")
+            self.force_stopped.append(rest[1])
+            if self.force_stop_error:
+                return call_result("Error: Force-stop of package failed\n", code=1, stderr="Error type 3\n")
+            return call_result("")
+        if rest[:1] == ["start"] and "-e" not in rest:
+            if rest != ["start", "-W", "-n", rest[-1]]:
+                raise AssertionError(f"unexpected launch command: {rest}")
+            self.launched.append(rest[3])
+            if self.launch_error:
+                return call_result("Error: Activity not started, unable to resolve Intent { cmp=... }\n", code=1,
+                                   stderr="Error type 3\n")
+            return call_result(f"Starting: Intent {{ cmp={rest[3]} }}\nStatus: ok\n")
         if rest[:1] != ["start"]:
             raise AssertionError(f"unexpected am command: {rest}")
         extras, index = {}, 1
@@ -207,7 +232,8 @@ class Device:
 
 def capture_args(**overrides):
     values = {"package": PACKAGE, "path": "captures/run.pcap", "serial": SERIAL, "seconds": 2, "consent_timeout": 1,
-              "timeout": 2, "api_key_env": None, "max_bytes": 33554432}
+              "timeout": 2, "api_key_env": None, "max_bytes": 33554432, "repeat": 1, "gap": 0, "launch": None,
+              "force_stop": False, "tls_decryption": False}
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -259,6 +285,26 @@ class BaseCase(unittest.TestCase):
 
     def capture(self, device=None, tool=None, **overrides):
         return self.run_command(pcapdroid.pcapdroid_capture, capture_args(**overrides), device=device, tool=tool)
+
+    def session_directory(self):
+        directory = self.root / "captures" / "session"
+        directory.mkdir()
+        return directory
+
+    def am_sequence(self, device):
+        """Session commands in dispatch order, named by their observed shape."""
+        kinds = []
+        for command in device.commands:
+            if "am" not in command:
+                continue
+            rest = command[command.index("am") + 1:]
+            if rest[:1] == ["force-stop"]:
+                kinds.append("force-stop")
+            elif "-W" in rest:
+                kinds.append("launch")
+            else:
+                kinds.append(f"capture-{rest[rest.index('action') + 1]}")
+        return kinds
 
     def preflight(self, device=None, tool=None, package=None, serial=SERIAL):
         return self.run_command(pcapdroid.pcapdroid_preflight, SimpleNamespace(serial=serial, package=package),
@@ -415,6 +461,35 @@ class ArgumentSafetyTests(BaseCase):
             self.skipTest("symlinks are unavailable on this platform")
         self.assert_refused("Symlink/reparse destination paths are not allowed", path="link/run.pcap")
 
+    def test_multi_window_paths_are_validated_before_dispatch(self):
+        directory = self.session_directory()
+        self.assert_refused("existing project directory", repeat=3, path="captures/run.pcap")
+        self.assert_refused("existing project directory", repeat=3, path="captures/absent")
+        self.assert_refused("UNC or alternate-stream path", repeat=2, path="captures/run.pcap:ads")
+        self.assert_refused("must name a new .pcap file", path=SESSION_PATH)
+        self.assert_refused("traversal", repeat=3, path="captures/session/../../escape")
+        self.assert_refused("not a device, UNC or alternate-stream path", repeat=3, path="\\\\server\\share\\run")
+        (directory / "window-01.pcap").write_bytes(b"previous session")
+        self.assert_refused("already exists", repeat=3, path=SESSION_PATH)
+        self.assert_refused("already exists", repeat=2, path=SESSION_PATH)
+        (directory / "window-01.pcap").unlink()
+        for path in (f"{SESSION_PATH}/window-02.pcap", f"{SESSION_PATH}/window-03.pcap"):
+            with self.subTest(path=path):
+                (self.root / path).write_bytes(b"previous session")
+                self.assert_refused("already exists", repeat=3, path=SESSION_PATH)
+                (self.root / path).unlink()
+        self.assertEqual(sorted(item.name for item in directory.iterdir()), [])
+
+    def test_symlinked_session_directory_is_refused(self):
+        target = self.root / "real"
+        target.mkdir()
+        link = self.root / "link"
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are unavailable on this platform")
+        self.assert_refused("Symlink/reparse destination paths are not allowed", repeat=3, path="link")
+
     def test_api_key_environment_failures_are_refused_before_dispatch(self):
         self.assert_refused("must name an environment variable", api_key_env="1BAD NAME")
         self.assert_refused("does not provide a PCAPdroid API key", api_key_env="FORGE_TEST_ABSENT_KEY")
@@ -422,6 +497,39 @@ class ArgumentSafetyTests(BaseCase):
             self.assert_refused("does not provide a PCAPdroid API key", api_key_env="FORGE_TEST_BLANK_KEY")
         with patch.dict(os.environ, {"FORGE_TEST_LONG_KEY": "k" * 513}):
             self.assert_refused("plausible PCAPdroid API key", api_key_env="FORGE_TEST_LONG_KEY")
+
+    def test_scripted_session_arguments_are_enforced_before_dispatch(self):
+        for field, value, message in (("repeat", 0, "repeat must be an integer between 1 and 20"),
+                                      ("repeat", 21, "repeat must be an integer between 1 and 20"),
+                                      ("repeat", "3", "repeat must be an integer between 1 and 20"),
+                                      ("repeat", True, "repeat must be an integer between 1 and 20"),
+                                      ("gap", -1, "gap must be a number of seconds between 0 and 60"),
+                                      ("gap", 61, "gap must be a number of seconds between 0 and 60"),
+                                      ("gap", True, "gap must be a number of seconds between 0 and 60"),
+                                      ("gap", "1", "gap must be a number of seconds between 0 and 60"),
+                                      ("launch", "ai.x.grok", "PACKAGE/COMPONENT"),
+                                      ("launch", ";id", "PACKAGE/COMPONENT"),
+                                      ("launch", "-W", "PACKAGE/COMPONENT"),
+                                      ("launch", "ai.x.grok/.Main Activity", "PACKAGE/COMPONENT"),
+                                      ("launch", "/.MainActivity", "PACKAGE/COMPONENT"),
+                                      ("force_stop", 1, "is a flag and takes no value"),
+                                      ("tls_decryption", "yes", "is a flag and takes no value")):
+            with self.subTest(field=field, value=value):
+                self.assert_refused(message, **{field: value})
+
+    def test_gap_and_repeat_bounds_accept_their_limits(self):
+        device = Device(payload=b"\x21" * 8)
+        self.session_directory()
+        record, stderr = self.capture(device, path=SESSION_PATH, repeat=20, gap=60, seconds=1)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertEqual(data["repeats"], 20)
+        self.assertEqual(data["gap_seconds"], 60)
+        self.assertEqual(len(data["windows"]), 20)
+        self.assertTrue(all(entry["success"] for entry in data["windows"]))
+        self.assertEqual(len(self.records("capture")), 20)
+        self.assertEqual(len(device.start_commands()), 20)
+        self.assertFalse(device.capture_running)
 
     def test_required_prerequisites_never_reach_the_device(self):
         device = Device(installed=False)
@@ -667,6 +775,314 @@ class CaptureFailureTests(BaseCase):
             self.capture(device)
         self.assertFalse((self.root / "captures" / "run.pcap").exists())
         self.assertFalse(self.rejection()["data"]["success"])
+
+
+class DecryptionTests(BaseCase):
+    RULES = json.dumps([{"type": "APP", "value": PACKAGE}], separators=(",", ":"))
+
+    def test_decryption_stays_off_unless_the_operator_opts_in(self):
+        device = Device(payload=b"\x05" * 16)
+        record, _ = self.capture(device)
+        data = record["data"]
+        settings = data["settings"]
+        self.assertFalse(settings["tls_decryption"])
+        self.assertEqual(settings["block_quic"], "never")
+        self.assertNotIn("decryption_rules", settings)
+        extras = extras_from(device.am_commands()[0])
+        self.assertEqual(extras["tls_decryption"], "false")
+        self.assertEqual(extras["block_quic"], "never")
+        self.assertNotIn("decryption_rules", extras)
+        self.assertFalse(data["decryption_requested"])
+        self.assertFalse(data["operator_approved_tls_decryption"])
+        self.assertIsNone(data["decryption_scope"])
+        self.assertFalse(any("request, not decryption" in item for item in data["limits"]))
+        session = self.records("capture-session")[0]["data"]
+        self.assertFalse(session["decryption_requested"])
+        self.assertNotIn("decryption_rules", session["settings"])
+
+    def test_tls_decryption_opt_in_sends_settings_and_records_consent(self):
+        device = Device(payload=b"\x06" * 16)
+        record, _ = self.capture(device, tls_decryption=True)
+        data = record["data"]
+        settings = data["settings"]
+        self.assertTrue(settings["tls_decryption"])
+        self.assertEqual(settings["block_quic"], "to_decrypt")
+        self.assertEqual(json.loads(settings["decryption_rules"]), json.loads(self.RULES),
+                         "the stored setting is redaction-normalized JSON; compare parsed rules")
+        extras = extras_from(device.am_commands()[0])
+        self.assertEqual(extras["tls_decryption"], "true")
+        self.assertEqual(extras["block_quic"], "to_decrypt")
+        self.assertEqual(shlex.split(extras["decryption_rules"]), [self.RULES],
+                         "the device shell must receive the JSON value intact")
+        self.assertTrue(data["decryption_requested"])
+        self.assertTrue(data["operator_approved_tls_decryption"])
+        self.assertIn("installs no CA", data["decryption_scope"])
+        self.assertIn("pinning", data["decryption_scope"])
+        self.assertIn("never evidence that a given flow was decrypted", data["decryption_scope"])
+        self.assertTrue(any("request, not decryption" in item for item in data["limits"]))
+        self.assertTrue(data["settings"]["full_payload"])
+
+    def test_decryption_is_independent_of_the_api_key(self):
+        device = Device(payload=b"\x07" * 16)
+        with patch.dict(os.environ, {"FORGE_TEST_API_KEY": "decryption-key-123"}):
+            record, stderr = self.capture(device, tls_decryption=True, api_key_env="FORGE_TEST_API_KEY")
+        data = record["data"]
+        self.assertTrue(data["settings"]["tls_decryption"])
+        self.assertTrue(data["settings"]["key_supplied"])
+        self.assertEqual(json.loads(data["settings"]["decryption_rules"]), json.loads(self.RULES))
+        self.assertEqual(data["dispatch_command"][data["dispatch_command"].index("api_key") + 1],
+                         pcapdroid.API_KEY_PLACEHOLDER)
+        self.assertNotIn("decryption-key-123", json.dumps(data))
+        self.assertNotIn("decryption-key-123", stderr)
+
+    def test_decryption_consent_survives_a_failed_window(self):
+        device = Device(stop_works=False)
+        with self.assertRaisesRegex(ForgeError, "still observed as running"):
+            self.capture(device, tls_decryption=True)
+        data = self.rejection()["data"]
+        self.assertTrue(data["decryption_requested"])
+        self.assertTrue(data["operator_approved_tls_decryption"])
+        self.assertIn("installs no CA", data["decryption_scope"])
+        self.assertEqual(json.loads(data["settings"]["decryption_rules"]), json.loads(self.RULES))
+        session = self.records("capture-session")[0]["data"]
+        self.assertFalse(session["success"])
+        self.assertTrue(session["decryption_requested"])
+        self.assertIn("trusted by the target app", session["decryption_scope"])
+        self.assertEqual(session["failures"][0]["index"], 1)
+        self.assertEqual(session["windows"][0]["evidence_id"], self.rejection()["id"])
+
+
+class SessionTests(BaseCase):
+    def test_single_window_run_records_a_session_and_keeps_the_capture_result(self):
+        device = Device(payload=b"\x14" * 8)
+        record, _ = self.capture(device)
+        self.assertEqual(record["data"]["action"], "capture")
+        self.assertEqual((record["data"]["window_index"], record["data"]["window_count"]), (1, 1))
+        session = self.records("capture-session")[0]["data"]
+        self.assertTrue(session["success"])
+        self.assertEqual(session["repeats"], 1)
+        self.assertEqual(session["attempted_windows"], 1)
+        self.assertEqual([entry["path"] for entry in session["windows"]], ["captures/run.pcap"])
+        self.assertEqual(session["windows"][0]["evidence_id"], record["id"])
+        self.assertEqual(session["windows"][0]["stop_state"], "stopped")
+        self.assertEqual(session["evidence_ids"], [record["data"]["preflight_evidence_id"], record["id"]])
+        self.assertEqual(session["destination"], "captures/run.pcap")
+        self.assertFalse(session["force_stop"])
+        self.assertIsNone(session["launch"])
+        self.assertEqual(session["failures"], [])
+        self.assertEqual((session["attempted_windows"], session["completed_windows"]), (1, 1))
+        self.assertFalse(session["capture_running_after_session"])
+        self.assertIsNone(session["settings"]["pcap_name"],
+                          "per-window dump names are listed in windows[]")
+        self.assertEqual(session["settings"]["app_filter"], PACKAGE)
+        self.assertIsNone(session["required_action"])
+
+    def test_three_window_session_records_every_window_and_a_session_record(self):
+        device = Device()
+        original_am = device.am
+        starts = []
+
+        def am_with_window_payload(rest):
+            # Only the CaptureCtrl start carries pcap_dump_mode; the scripted `am start -W`
+            # launch must not advance the per-window payload.
+            if rest[:1] == ["start"] and "pcap_dump_mode" in rest:
+                starts.append(1)
+                device.payload = bytes([0x40 + len(starts)]) * 8
+            return original_am(rest)
+        device.am = am_with_window_payload
+        directory = self.session_directory()
+        record, stderr = self.capture(device, path=SESSION_PATH, repeat=3, gap=1, launch=LAUNCH, force_stop=True)
+        data = record["data"]
+        self.assertEqual(data["action"], "capture-session")
+        self.assertTrue(data["success"])
+        self.assertEqual((data["repeats"], data["attempted_windows"], data["completed_windows"]), (3, 3, 3))
+        self.assertEqual((data["gap_seconds"], data["seconds"]), (1, 2))
+        self.assertTrue(data["force_stop"])
+        self.assertEqual(data["launch"], LAUNCH)
+        self.assertEqual(data["destination"], SESSION_PATH)
+        self.assertEqual(data["failures"], [])
+        self.assertEqual(data["target_uid"], 10345)
+        self.assertEqual(data["evidence_ids"][0], data["preflight_evidence_id"])
+        self.assertEqual(len(data["windows"]), 3)
+        self.assertFalse(data["capture_running_after_session"])
+        self.assertFalse(data["service_after_session"]["running"])
+        self.assertEqual(data["service_after_session"]["records"], [])
+        self.assertIsNone(data["required_action"])
+
+        names = set()
+        for position, entry in enumerate(data["windows"], start=1):
+            expected = pcap_bytes(bytes([0x40 + position]) * 8)
+            self.assertEqual((directory / f"window-{position:02d}.pcap").read_bytes(), expected)
+            self.assertEqual(entry["index"], position)
+            self.assertEqual(entry["path"], f"{SESSION_PATH}/window-{position:02d}.pcap")
+            self.assertTrue(entry["attempted"] and entry["success"])
+            self.assertFalse(entry["empty"])
+            self.assertEqual(entry["sha256"], hashlib.sha256(expected).hexdigest())
+            self.assertEqual(entry["size"], len(expected))
+            self.assertEqual(entry["stop_state"], "stopped")
+            self.assertIsNone(entry["error"])
+            window = self.store.get(entry["evidence_id"])["data"]
+            self.assertEqual((window["action"], window["success"]), ("capture", True))
+            self.assertEqual((window["window_index"], window["window_count"]), (position, 3))
+            self.assertEqual(window["capture"]["sha256"], entry["sha256"])
+            self.assertEqual(window["capture"]["path"], entry["path"])
+            self.assertEqual(window["settings"]["pcap_name"], entry["pcap_name"])
+            self.assertEqual(window["device"]["device_size"], len(expected))
+            self.assertEqual(window["force_stop_action"]["command"][-2:], ["force-stop", PACKAGE])
+            self.assertEqual(window["launch_action"]["command"][-3:], ["-W", "-n", LAUNCH])
+            self.assertTrue(window["force_stop_action"]["accepted"] and window["launch_action"]["accepted"])
+            names.add(entry["pcap_name"])
+        self.assertEqual(len(names), 3, "every window needs its own dump name")
+        self.assertEqual(sorted(record["data"]["window_index"] for record in self.records("capture")), [1, 2, 3])
+        self.assertEqual(len(self.records("capture")), 3)
+
+        self.assertEqual(device.force_stopped, [PACKAGE, PACKAGE, PACKAGE])
+        self.assertEqual(device.launched, [LAUNCH, LAUNCH, LAUNCH])
+        self.assertEqual(self.am_sequence(device),
+                         ["capture-start", "force-stop", "launch", "capture-stop"] * 3,
+                         "force-stop and launch run inside every window, before that window's stop")
+        self.assertEqual(stderr.count("approve it on the device"), 3, "each window keeps its own stop notice")
+        self.assertEqual(stderr.count("starting forge-"), 3)
+        self.assertIn("window 2/3", stderr)
+        self.assertFalse(device.capture_running)
+
+    def test_mid_session_failure_stops_later_windows_and_keeps_completed_ones(self):
+        device = Device(payload=b"\x11" * 32)
+        directory = self.session_directory()
+        original_pull = device.pull
+        pulls = []
+
+        def fail_second_pull(remote, local):
+            pulls.append(remote)
+            if len(pulls) == 2:
+                return call_result("", code=1, stderr="adb: error: failed to stat remote object\n")
+            return original_pull(remote, local)
+
+        device.pull = fail_second_pull
+        with self.assertRaisesRegex(ForgeError, "window 2/3") as raised:
+            self.capture(device, path=SESSION_PATH, repeat=3)
+        self.assertIn("could not pull the capture file", str(raised.exception))
+        self.assertIn("capture-session evidence", str(raised.exception))
+        session = self.records("capture-session")[0]["data"]
+        self.assertFalse(session["success"])
+        self.assertEqual((session["repeats"], session["attempted_windows"], session["completed_windows"]), (3, 2, 1))
+        self.assertEqual([entry["attempted"] for entry in session["windows"]], [True, True, False])
+        self.assertEqual([entry["success"] for entry in session["windows"]], [True, False, False])
+        self.assertEqual(session["windows"][2]["path"], f"{SESSION_PATH}/window-03.pcap")
+        self.assertIsNone(session["windows"][2]["evidence_id"])
+        self.assertIsNone(session["windows"][2]["pcap_name"])
+        self.assertEqual(len(session["failures"]), 1)
+        self.assertEqual(session["failures"][0]["index"], 2)
+        self.assertEqual(session["failures"][0]["evidence_id"], session["windows"][1]["evidence_id"])
+        self.assertIn("could not pull the capture file", session["failures"][0]["error"])
+        self.assertFalse(session["capture_running_after_session"])
+        self.assertTrue(session["windows"][0]["sha256"], "the completed window keeps its hash")
+        self.assertTrue((directory / "window-01.pcap").is_file())
+        self.assertFalse((directory / "window-02.pcap").exists())
+        self.assertFalse((directory / "window-03.pcap").exists())
+        self.assertFalse(device.capture_running)
+        self.assertEqual(len(device.start_commands()), 2, "no further window may start after a failure")
+        rejection = self.rejection()["data"]
+        self.assertEqual(rejection["window_index"], 2)
+        self.assertEqual(rejection["window_count"], 3)
+        self.assertFalse(rejection["destination_published"])
+        self.assertEqual(rejection["retrieval"], {"pulled": False, "published": False})
+        self.assertEqual(rejection["stop"]["state"], "stopped")
+        self.assertEqual(rejection["limits"], self.records("capture-session")[0]["data"]["limits"])
+
+    def test_window_precheck_refuses_to_start_when_a_foreign_capture_runs(self):
+        device = Device(payload=b"\x12" * 32)
+        self.session_directory()
+        original_pull = device.pull
+
+        def pull_then_foreign_capture(remote, local):
+            result = original_pull(remote, local)
+            device.capture_running = True
+            return result
+
+        device.pull = pull_then_foreign_capture
+        with self.assertRaisesRegex(ForgeError, "window 2/3") as raised:
+            self.capture(device, path=SESSION_PATH, repeat=3)
+        self.assertIn("prerequisite missing: capture-active", str(raised.exception))
+        rejection = self.rejection()["data"]
+        self.assertEqual(rejection["window_index"], 2)
+        self.assertIsNone(rejection["dispatch"])
+        self.assertIsNone(rejection["stop"], "a foreign capture is never stopped")
+        self.assertTrue(rejection["service_precheck"]["known"])
+        self.assertTrue(rejection["service_precheck"]["running"])
+        self.assertIn("Resolve the reported prerequisite", rejection["required_action"])
+        session = self.records("capture-session")[0]["data"]
+        self.assertEqual([entry["attempted"] for entry in session["windows"]], [True, True, False])
+        self.assertTrue(session["windows"][0]["success"])
+        self.assertFalse(session["windows"][1]["success"])
+        self.assertTrue(session["capture_running_after_session"], "a foreign capture is reported, not adopted")
+        self.assertEqual(len(device.start_commands()), 1)
+        self.assertEqual(len(device.stop_commands()), 1, "only this session's own capture was stopped")
+
+    def test_window_stop_failure_keeps_evidence_and_asks_the_operator(self):
+        device = Device(payload=b"\x13" * 32)
+        self.session_directory()
+        original_pull = device.pull
+
+        def stop_after_first_window(remote, local):
+            result = original_pull(remote, local)
+            device.stop_works = False
+            return result
+
+        device.pull = stop_after_first_window
+        with self.assertRaisesRegex(ForgeError, "window 2/3") as raised:
+            self.capture(device, path=SESSION_PATH, repeat=3)
+        self.assertIn("still observed as running", str(raised.exception))
+        rejection = self.rejection()["data"]
+        self.assertEqual(rejection["window_index"], 2)
+        self.assertTrue(rejection["stop"]["requested"])
+        self.assertEqual(rejection["stop"]["state"], "stop-not-observed")
+        self.assertIn("stop the capture manually", rejection["required_action"])
+        session = self.records("capture-session")[0]["data"]
+        self.assertFalse(session["success"])
+        self.assertEqual(session["windows"][1]["stop_state"], "stop-not-observed")
+        self.assertFalse(session["windows"][2]["attempted"])
+        self.assertTrue(session["capture_running_after_session"])
+        self.assertEqual(len(device.start_commands()), 2)
+        self.assertTrue(device.capture_running,
+                        "the fake device keeps the capture the operator must stop by hand")
+
+    def test_undispatched_force_stop_fails_the_window_after_stopping_our_capture(self):
+        device = Device(payload=b"\x15" * 8, force_stop_error=True)
+        with self.assertRaisesRegex(ForgeError, "scripted force-stop action was not dispatched"):
+            self.capture(device, launch=LAUNCH, force_stop=True)
+        data = self.rejection()["data"]
+        self.assertFalse(data["force_stop_action"]["accepted"])
+        self.assertTrue(data["launch_action"]["accepted"])
+        self.assertEqual(data["force_stop_action"]["command"][-2:], ["force-stop", PACKAGE])
+        self.assertEqual(data["launch_action"]["command"][-3:], ["-W", "-n", LAUNCH])
+        self.assertEqual(len(device.stop_commands()), 1, "our own capture is always stopped")
+        self.assertFalse(device.capture_running)
+        self.assertFalse(any("pull" in command for command in device.commands))
+        self.assertFalse((self.root / "captures" / "run.pcap").exists())
+        self.assertFalse(self.records("capture-session")[0]["data"]["success"])
+
+    def test_undispatched_launch_fails_the_window_after_stopping_our_capture(self):
+        device = Device(payload=b"\x16" * 8, launch_error=True)
+        with self.assertRaisesRegex(ForgeError, "scripted launch action was not dispatched"):
+            self.capture(device, launch=LAUNCH, force_stop=True)
+        data = self.rejection()["data"]
+        self.assertTrue(data["force_stop_action"]["accepted"])
+        self.assertFalse(data["launch_action"]["accepted"])
+        self.assertIn("unable to resolve", data["launch_action"]["error_line"])
+        self.assertEqual(len(device.stop_commands()), 1)
+        self.assertFalse(device.capture_running)
+        self.assertFalse((self.root / "captures" / "run.pcap").exists())
+
+    def test_scripted_actions_are_optional_and_absent_by_default(self):
+        device = Device(payload=b"\x17" * 8)
+        record, _ = self.capture(device)
+        data = record["data"]
+        self.assertIsNone(data["launch_action"])
+        self.assertIsNone(data["force_stop_action"])
+        self.assertEqual(device.launched, [])
+        self.assertEqual(device.force_stopped, [])
+        self.assertEqual(self.am_sequence(device), ["capture-start", "capture-stop"])
 
 
 class PrivacyTests(BaseCase):

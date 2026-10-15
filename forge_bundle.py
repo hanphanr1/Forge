@@ -31,8 +31,9 @@ _ENUMS = {
     "member_filter": {"dex"},
     "context_kind": {"method", "field_initializer", "class_scope", "comment", "unsupported"},
     "resolution": {"syntactic_constructor_binding", "direct_field_initializer",
-                   "same_class_field_candidate", "same_class_name_candidate"},
+                   "same_class_field_candidate", "same_class_name_candidate", "cross_file_name_candidate"},
     "marker_kind": {"url_call", "dispatch_call", "retrofit_annotation"},
+    "receiver_kind": {"bare", "this", "owner_class", "named_receiver", "expression", "constructor"},
     "kind": {"dns_query", "dns_answer", "tls_sni", "http_host"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
@@ -40,9 +41,11 @@ _ENUMS = {
     "action": {"imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph", "devices", "install",
                "install-multiple", "preflight", "pull", "push", "pull-package", "observe", "packages", "package",
                "frida-prerequisite", "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices",
-               "ios-pair", "decompile", "api-map", "capture", "pcap-analyze"},
+               "ios-pair", "decompile", "api-map", "capture", "pcap-analyze", "caller-map",
+               "capture-session", "capture-rejected"},
     "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
-               "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1"},
+               "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1",
+               "forge.android-caller-map/v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
                "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
                "observed", "paired", "not-paired", "unknown"},
@@ -57,11 +60,26 @@ _CONTAINERS |= {"source_traces", "field_links", "uses", "callers", "request_mark
 _PRIVATE |= {"hostname", "source_ip", "destination_ip", "uid", "package_hint", "remote",
              "remote_name", "api_key", "api_key_env", "collector_host"}
 _FLAGS |= {"decryption_performed", "capture_started_observed", "capture_stopped_observed",
-           "package_hint_truncated"}
+           "package_hint_truncated", "decryption_requested",
+           "operator_approved_tls_decryption", "attempted", "overload_aware", "declaration_ambiguous",
+           "possible_owners_omitted", "http_methods_omitted", "http_paths_omitted"}
 _NUMBERS |= {"packets_scanned", "malformed_packets", "unsupported_packets", "packet_index",
              "timestamp", "source_port", "destination_port", "hosts_omitted",
              "flows_omitted", "host_observations_omitted", "captured_packet_truncations"}
 _CONTAINERS |= {"capture", "hosts", "flows", "static_host_matches"}
+_NUMBERS |= {"packets_scanned", "malformed_packets", "unsupported_packets", "packet_index",
+             "timestamp", "source_port", "destination_port", "hosts_omitted",
+             "flows_omitted", "host_observations_omitted", "captured_packet_truncations",
+             "http_request_lines", "repeats", "attempted_windows", "completed_windows",
+             "gap_seconds", "seconds", "max_bytes", "window_index", "window_count", "index",
+             "candidates_omitted", "candidates_filtered", "declarations_skipped",
+             "annotation_uses_skipped", "files_enumerated", "files_scanned", "files_skipped_kt",
+             "files_omitted", "bytes_scanned", "bytes_omitted"}
+_CONTAINERS |= {"capture", "hosts", "flows", "static_host_matches", "windows", "failures",
+                "force_stop_action", "launch_action", "service_precheck", "service_after_session",
+                "decryption_basis"}
+_SAFE_STRINGS |= {"http_methods"}
+_PRIVATE |= {"file", "receiver", "http_paths", "decryption_scope"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",
