@@ -174,9 +174,24 @@ forge --project target har-import captures/flows.har --limit 50
 forge --project target api-shape --domain "<observed-host>"
 ```
 
-`flow-to-har` needs the optional `flows` extra (`pip install 'forge-protocol[flows]'`), caps every body with
-`--max-body-bytes`, records truncation and flow counts, and makes no network calls. `--ssl-keylog NAME` instead
-asks PCAPdroid for an SSLKEYLOGFILE for offline decryption of captured TLS.
+`flow-to-har` reads the dump with its built-in stdlib tnetstring parser (verified against mitmproxy on real
+dumps); `--reader mitmproxy` falls back to the optional `flows` extra. Binary bodies are stored base64 with
+`encoding: "base64"`; gRPC request bodies keep the exchange on import with a `binary_body_omitted` warning.
+`--ssl-keylog NAME` instead asks PCAPdroid for an SSLKEYLOGFILE for offline decryption of captured TLS.
+
+`grpc-analyze DUMP` splits gRPC-web frames (both directions, trailer frames, compressed frames reported) and
+decodes protobuf without a schema into bounded field trees such as `1{1:"vi-VN"}` — depth and node caps,
+long values withheld to length+SHA-256, `grpc-status`/`grpc-message` surfaced when present. Field numbers are
+not field names; decoded bodies stay local.
+
+`gadget-capture` runs the whole no-root route as one bounded pipeline: repackage with the Gadget
+(`extractNativeLibs` enabled, ELF-aware signing), sign base and every split with one identity, uninstall the
+official build, install the set, preflight the MITM addon, capture with decryption while the built-in
+`forge-trust-bypass.js` attaches to the Gadget, pull the flow dump, convert to HAR and import it. Every stage
+records its own evidence; the first failure stops with the next operator action. A dead adb server is
+restarted once and retried; `--launch-no-wait` keeps a wait-mode Gadget from hanging the launch; after each
+decryption window the scoped logcat is parsed for mitmproxy `client does not trust the proxy's certificate`
+rejections (per-host counts) so a late trust hook is reported instead of silent zero flows.
 
 `capture-ingest` runs a bounded loopback listener so a capture tool can push HAR directly instead of a manual export/import. It binds `127.0.0.1` only, stops at `--seconds` (1..3600), `--max-records` or an error, and accepts a HAR document, an entries array or one entry object. Each exchange is stored through the same normalization as `har-import`, so pushed traffic stays `captured_http` and is never promoted to live proof. With `--port 0` the chosen port is announced once on stderr; stdout stays `{ok, result}`. `--token` requires a matching `X-Forge-Token` or `Authorization: Bearer` header. Oversized bodies, wrong method/route, a bad token and malformed JSON are rejected with per-reason counters and never echo request data.
 

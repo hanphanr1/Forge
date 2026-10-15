@@ -21,6 +21,22 @@ PACKAGE = "ai.x.grok"
 LAUNCH = "ai.x.grok/.MainActivity"
 SESSION_PATH = "captures/session"
 PCAP_HEADER = b"\xd4\xc3\xb2\xa1" + b"\x02\x00\x04\x00" + b"\x00" * 8 + b"\x00\x08\x00\x00" + b"\x01\x00\x00\x00"
+# Synthesized addon logcat tail in the shape the device produces: two rejections for one host
+# (one of them upper-cased with a trailing dot), one wrapped onto a second line, one without a
+# host at all, plus an unrelated request line whose URL must never reach evidence.
+LOGCAT_TAIL = (
+    "10-15 21:04:01.010  4211  4310 D mitmproxy: [127.0.0.1:43036] Client TLS handshake failed. The client does not "
+    "trust the proxy's certificate for grok.com (OpenSSL Error([('SSL routines', '', 'sslv3 alert certificate "
+    "unknown')]))\n"
+    "10-15 21:04:01.220  4211  4310 I mitmproxy: GET https://grok.com/_data/v1/app_config HTTP/2.0 200\n"
+    "10-15 21:04:02.010  4211  4311 D mitmproxy: [127.0.0.1:43044] Client TLS handshake failed. The client does not "
+    "trust the proxy's certificate for Grok.com. (OpenSSL Error(...))\n"
+    "10-15 21:04:02.510  4211  4312 D mitmproxy: [127.0.0.1:43050] Client TLS handshake failed. The client does not "
+    "trust the proxy's\ncertificate for api.x.ai (OpenSSL Error(...))\n"
+    "10-15 21:04:03.010  4211  4313 W mitmproxy: Client TLS handshake failed. The client does not trust the proxy's "
+    "certificate (no SNI)\n"
+    "10-15 21:04:03.500  3102  3102 I ActivityManager: unrelated line\n")
+REJECTION_HOSTS = {"grok.com": 2, "api.x.ai": 1, pcapdroid.UNATTRIBUTED_HOST: 1}
 
 
 def pcap_bytes(payload=b""):
@@ -53,7 +69,7 @@ class Device:
                  stop_works=True, header_valid=True, payload=b"", truncate_service=False, start_error=False,
                  device_size=None, create_file=True, defer_data=False, truncate_package=False, am_echo="",
                  devices=None, adb="configured-adb", launch_error=False, force_stop_error=False,
-                 mitm_installed=False):
+                 mitm_installed=False, logcat="", logcat_error=None, logcat_omitted=0):
         self.adb = adb
         self.mitm_installed = mitm_installed
         self.installed = installed
@@ -72,6 +88,9 @@ class Device:
         self.am_echo = am_echo
         self.launch_error = launch_error
         self.force_stop_error = force_stop_error
+        self.logcat_text = logcat
+        self.logcat_error = logcat_error
+        self.logcat_omitted = logcat_omitted
         self.devices = [{"serial": SERIAL, "state": "device"}] if devices is None else devices
         self.file = None
         self.remote_path = None
@@ -97,10 +116,20 @@ class Device:
                 return self.exec_out(rest[1:], binary)
             if rest[:1] == ["pull"]:
                 return self.pull(rest[1], rest[2])
+            if rest[:1] == ["logcat"]:
+                return self.logcat(rest)
         raise AssertionError(f"unexpected ADB command: {argv}")
 
     def am_commands(self):
         return [command for command in self.commands if "am" in command]
+
+    def launch_rest(self):
+        """The scripted launch argv after `am`, one entry per launch dispatch."""
+        return [command[command.index("am") + 1:] for command in self.am_commands()
+                if command[command.index("am") + 1] == "start" and "-e" not in command]
+
+    def logcat_commands(self):
+        return [command for command in self.commands if "logcat" in command]
 
     def stop_commands(self):
         return [command for command in self.am_commands() if "stop" in command]
@@ -188,13 +217,15 @@ class Device:
                 return call_result("Error: Force-stop of package failed\n", code=1, stderr="Error type 3\n")
             return call_result("")
         if rest[:1] == ["start"] and "-e" not in rest:
-            if rest != ["start", "-W", "-n", rest[-1]]:
+            if rest == ["start", "-n", rest[-1]]:
+                pass  # --launch-no-wait: a plain `am start -n`, no Activity-result wait
+            elif rest != ["start", "-W", "-n", rest[-1]]:
                 raise AssertionError(f"unexpected launch command: {rest}")
-            self.launched.append(rest[3])
+            self.launched.append(rest[-1])
             if self.launch_error:
                 return call_result("Error: Activity not started, unable to resolve Intent { cmp=... }\n", code=1,
                                    stderr="Error type 3\n")
-            return call_result(f"Starting: Intent {{ cmp={rest[3]} }}\nStatus: ok\n")
+            return call_result(f"Starting: Intent {{ cmp={rest[-1]} }}\nStatus: ok\n")
         if rest[:1] != ["start"]:
             raise AssertionError(f"unexpected am command: {rest}")
         extras, index = {}, 1
@@ -234,11 +265,19 @@ class Device:
         size = len(self.file) if self.device_size is None else self.device_size
         return call_result(f"{size}\n")
 
+    def logcat(self, rest):
+        """Only the scoped addon tail may be read, and only with the documented bound."""
+        if rest != ["logcat", "-d", "-t", str(pcapdroid.LOGCAT_TAIL_LINES), "-s", pcapdroid.LOGCAT_TAG + ":*"]:
+            raise AssertionError(f"unexpected logcat command: {rest}")
+        if self.logcat_error is not None:
+            return self.logcat_error
+        return call_result(self.logcat_text, omitted_out=self.logcat_omitted)
+
 
 def capture_args(**overrides):
     values = {"package": PACKAGE, "path": "captures/run.pcap", "serial": SERIAL, "seconds": 2, "consent_timeout": 1,
               "timeout": 2, "api_key_env": None, "max_bytes": 33554432, "repeat": 1, "gap": 0, "launch": None,
-              "force_stop": False, "tls_decryption": False}
+              "force_stop": False, "tls_decryption": False, "launch_no_wait": False}
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -256,6 +295,37 @@ def extras_from(command):
         else:
             raise AssertionError(f"unexpected argument: {command[index]}")
     return extras
+
+
+class FlakyAdb:
+    """Device proxy that answers matching calls with a dead-server result before delegating.
+
+    `restarts` records the server restarts the code under test asked for, `forwarded` the
+    calls that were answered with the failure instead of reaching the device, and `calls`
+    every invocation in order.
+    """
+
+    def __init__(self, device, *, error=None, failures=1, match=None):
+        self.device = device
+        self.adb = device.adb
+        self.error = f"error: device '{SERIAL}' not found\n" if error is None else error
+        self.remaining = failures
+        self.match = match if match is not None else (lambda argv: True)
+        self.restarts = []
+        self.forwarded = []
+        self.calls = []
+
+    def __call__(self, command, timeout, binary=False):
+        argv = [str(item) for item in command]
+        self.calls.append(argv)
+        if argv[0] == self.adb and argv[1:] in (["kill-server"], ["start-server"]):
+            self.restarts.append(argv[1])
+            return call_result("", stderr="* daemon started successfully *\n" if argv[1] == "start-server" else "")
+        if self.remaining and self.match(argv):
+            self.remaining -= 1
+            self.forwarded.append(argv)
+            return call_result("", code=1, stderr=self.error)
+        return self.device(command, timeout, binary=binary)
 
 
 class BaseCase(unittest.TestCase):
@@ -305,7 +375,7 @@ class BaseCase(unittest.TestCase):
             rest = command[command.index("am") + 1:]
             if rest[:1] == ["force-stop"]:
                 kinds.append("force-stop")
-            elif "-W" in rest:
+            elif "action" not in rest:
                 kinds.append("launch")
             else:
                 kinds.append(f"capture-{rest[rest.index('action') + 1]}")
@@ -518,9 +588,13 @@ class ArgumentSafetyTests(BaseCase):
                                       ("launch", "ai.x.grok/.Main Activity", "PACKAGE/COMPONENT"),
                                       ("launch", "/.MainActivity", "PACKAGE/COMPONENT"),
                                       ("force_stop", 1, "is a flag and takes no value"),
-                                      ("tls_decryption", "yes", "is a flag and takes no value")):
+                                      ("tls_decryption", "yes", "is a flag and takes no value"),
+                                      ("launch_no_wait", "yes", "is a flag and takes no value")):
             with self.subTest(field=field, value=value):
                 self.assert_refused(message, **{field: value})
+
+    def test_launch_no_wait_requires_the_scripted_launch_it_shortens(self):
+        self.assert_refused("--launch-no-wait only applies with --launch", launch_no_wait=True)
 
     def test_gap_and_repeat_bounds_accept_their_limits(self):
         device = Device(payload=b"\x21" * 8)
@@ -1141,6 +1215,246 @@ class SessionTests(BaseCase):
         self.assertEqual(device.launched, [])
         self.assertEqual(device.force_stopped, [])
         self.assertEqual(self.am_sequence(device), ["capture-start", "capture-stop"])
+
+
+class LaunchNoWaitTests(BaseCase):
+    """`--launch-no-wait` dispatches a plain `am start -n` and records that it did not wait."""
+
+    def test_no_wait_launch_is_a_plain_am_start_with_recorded_evidence(self):
+        device = Device(payload=b"\x18" * 8)
+        record, _ = self.capture(device, launch=LAUNCH, launch_no_wait=True)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertEqual(device.launch_rest(), [["start", "-n", LAUNCH]])
+        self.assertEqual(data["launch_action"]["command"][-2:], ["-n", LAUNCH])
+        self.assertNotIn("-W", data["launch_action"]["command"])
+        self.assertFalse(data["launch_action"]["wait_for_launch"])
+        self.assertTrue(data["launch_action"]["accepted"])
+        self.assertEqual(device.launched, [LAUNCH])
+        self.assertEqual(self.am_sequence(device), ["capture-start", "launch", "capture-stop"])
+        self.assertTrue((self.root / "captures" / "run.pcap").is_file())
+
+    def test_the_default_launch_still_waits_and_says_so(self):
+        device = Device(payload=b"\x19" * 8)
+        record, _ = self.capture(device, launch=LAUNCH, force_stop=True)
+        data = record["data"]
+        self.assertEqual(device.launch_rest(), [["start", "-W", "-n", LAUNCH]])
+        self.assertEqual(data["launch_action"]["command"][-3:], ["-W", "-n", LAUNCH])
+        self.assertTrue(data["launch_action"]["wait_for_launch"])
+        self.assertFalse(self.records("capture-session")[0]["data"]["launch_no_wait"])
+
+    def test_every_window_of_a_no_wait_session_launches_without_waiting(self):
+        device = Device(payload=b"\x1a" * 8)
+        self.session_directory()
+        record, _ = self.capture(device, path=SESSION_PATH, repeat=2, launch=LAUNCH, force_stop=True,
+                                 launch_no_wait=True)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertTrue(data["launch_no_wait"])
+        self.assertEqual([entry["success"] for entry in data["windows"]], [True, True])
+        self.assertEqual(device.launch_rest(), [["start", "-n", LAUNCH]] * 2)
+        self.assertEqual(self.am_sequence(device),
+                         ["capture-start", "force-stop", "launch", "capture-stop"] * 2)
+        for entry in data["windows"]:
+            window = self.store.get(entry["evidence_id"])["data"]
+            self.assertFalse(window["launch_action"]["wait_for_launch"])
+
+
+class AdbRestartTests(BaseCase):
+    """A dead ADB server is restarted once and that call retried; nothing else is ever retried."""
+
+    def test_a_dead_server_during_a_window_is_restarted_once_and_recorded(self):
+        device = Device(payload=b"\x1b" * 8)
+        proxy = FlakyAdb(device, match=lambda argv: "am" in argv and "action" in argv)
+        record, stderr = self.capture(proxy)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertEqual(proxy.restarts, ["kill-server", "start-server"])
+        self.assertTrue(data["adb_server_restarted"])
+        restart = data["adb_server_restart"]
+        self.assertTrue(restart["retried_once"], "the retry is the whole point of the restart")
+        self.assertEqual(restart["trigger"], f"error: device '{SERIAL}' not found")
+        self.assertEqual([restart["kill_server"]["returncode"], restart["start_server"]["returncode"]], [0, 0])
+        self.assertFalse(restart["kill_server"]["output_truncated"])
+        self.assertIn("daemon started successfully", restart["start_server"]["stderr"])
+        self.assertEqual(len(device.start_commands()), 1, "the dispatch that died is retried exactly once")
+        self.assertTrue(self.records("capture-session")[0]["data"]["adb_server_restarted"])
+        self.assertIn("restarted it once", stderr)
+        self.assertTrue((self.root / "captures" / "run.pcap").is_file())
+
+    def test_other_device_failures_are_never_restarted_or_retried(self):
+        cases = (f"error: device '{SERIAL}' unauthorized\n", "error: closed\n",
+                 "error: more than one device/emulator\n", "adb: error: failed to stat remote object\n")
+        for error in cases:
+            with self.subTest(error=error):
+                device = Device()
+                proxy = FlakyAdb(device, error=error)
+                with self.assertRaises(ForgeError):
+                    self.capture(proxy)
+                self.assertEqual(proxy.restarts, [])
+                self.assertEqual(len(proxy.forwarded), 1, "a non-server failure must be answered once")
+                self.assertFalse(any("kill-server" in command for command in proxy.calls))
+                self.assertFalse(self.records("capture-session")[0]["data"]["adb_server_restarted"])
+                self.assertIsNone(self.records("capture-session")[0]["data"]["adb_server_restart"])
+
+    def test_the_restart_is_one_shot_even_when_the_server_dies_again(self):
+        device = Device()
+        proxy = FlakyAdb(device, failures=2)
+        with self.assertRaises(ForgeError):
+            self.capture(proxy)
+        self.assertEqual(proxy.restarts, ["kill-server", "start-server"])
+        self.assertEqual(len([command for command in proxy.calls if command[1:2] == ["kill-server"]]), 1)
+        self.assertEqual(len(proxy.forwarded), 2, "the retry itself is not retried again")
+
+    def test_the_restart_flag_is_per_window_while_the_session_records_the_whole_run(self):
+        device = Device(payload=b"\x1c" * 8)
+        directory = self.session_directory()
+        starts = []
+
+        def second_capture_start(argv):
+            if "action" in argv and argv[argv.index("action") + 1] == "start":
+                starts.append(1)
+                return len(starts) == 2
+            return False
+
+        proxy = FlakyAdb(device, match=second_capture_start)
+        record, _ = self.capture(proxy, path=SESSION_PATH, repeat=2)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        first, second = (self.store.get(entry["evidence_id"])["data"] for entry in data["windows"])
+        self.assertFalse(first["adb_server_restarted"])
+        self.assertIsNone(first["adb_server_restart"])
+        self.assertTrue(second["adb_server_restarted"])
+        self.assertTrue(second["adb_server_restart"]["retried_once"])
+        self.assertTrue(data["adb_server_restarted"])
+        self.assertEqual(proxy.restarts, ["kill-server", "start-server"])
+        self.assertEqual(sorted(item.name for item in directory.iterdir()), ["window-01.pcap", "window-02.pcap"])
+
+    def test_restart_evidence_never_carries_the_api_key(self):
+        secret = "pcapdroid-restart-secret-77"
+        device = Device(payload=b"\x1d" * 8)
+
+        def failing(command, timeout, binary=False):
+            argv = [str(item) for item in command]
+            if argv[1:] in (["kill-server"], ["start-server"]):
+                return call_result("")
+            if "am" in argv and "action" in argv and not failing.answered:
+                failing.answered = True
+                return call_result("", code=1, stderr=f"error: device '{SERIAL}' not found; argv {argv}\n")
+            return device(command, timeout, binary=binary)
+
+        failing.answered = False
+
+        with patch.dict(os.environ, {"FORGE_TEST_RESTART_KEY": secret}):
+            record, stderr = self.capture(failing, api_key_env="FORGE_TEST_RESTART_KEY",
+                                          tool={"return_value": device.adb})
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertTrue(data["adb_server_restarted"])
+        self.assertEqual(data["dispatch_command"][data["dispatch_command"].index("api_key") + 1],
+                         pcapdroid.API_KEY_PLACEHOLDER)
+        self.assertIn("[REDACTED]", data["adb_server_restart"]["trigger"])
+        self.assertNotIn(secret, json.dumps(data["adb_server_restart"]))
+        self.assertNotIn(secret, self.stored_text())
+        self.assertNotIn(secret, stderr)
+
+
+class TlsRejectionTests(BaseCase):
+    """Post-window diagnostics: per-host client TLS rejections from the scoped addon logcat tail."""
+
+    def test_rejections_are_counted_per_host_with_no_log_value_in_evidence(self):
+        device = Device(mitm_installed=True, logcat=LOGCAT_TAIL)
+        record, _ = self.capture(device, tls_decryption=True)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertTrue(data["empty"], "the fixture holds no packet data: the rejections explain why")
+        self.assertEqual(data["tls_client_rejections"], REJECTION_HOSTS)
+        self.assertEqual(data["tls_client_rejection_total"], sum(REJECTION_HOSTS.values()))
+        self.assertEqual(device.logcat_commands()[0][-2:], ["-s", "mitmproxy:*"], "only the addon tag is read")
+        self.assertEqual(len(device.logcat_commands()), 1, "one bounded tail per window")
+        logcat = data["tls_logcat"]
+        self.assertEqual((logcat["tag"], logcat["tail_lines"]), ("mitmproxy", pcapdroid.LOGCAT_TAIL_LINES))
+        self.assertEqual((logcat["lines_read"], logcat["observed"], logcat["output_truncated"], logcat["reason"]),
+                         (LOGCAT_TAIL.count("\n"), True, False, None))
+        self.assertFalse(data["no_flows_and_no_rejections"])
+        self.assertIn("trust bypass", data["tls_client_rejection_scope"])
+        self.assertIn("host names only", data["tls_client_rejection_scope"])
+        stored = self.stored_text()
+        self.assertNotIn("/_data/v1/app_config", stored, "addon request values never reach evidence")
+        self.assertNotIn("OpenSSL", stored)
+        self.assertNotIn("ActivityManager", stored)
+
+    def test_zero_rejections_with_an_empty_dump_are_reported_together(self):
+        device = Device(mitm_installed=True, logcat="10-15 21:00:00.000  4211  4310 I mitmproxy: listening\n")
+        record, _ = self.capture(device, tls_decryption=True)
+        data = record["data"]
+        self.assertTrue(data["success"])
+        self.assertTrue(data["empty"])
+        self.assertEqual(data["tls_client_rejections"], {})
+        self.assertEqual(data["tls_client_rejection_total"], 0)
+        self.assertTrue(data["no_flows_and_no_rejections"])
+        self.assertEqual(data["tls_logcat"]["lines_read"], 1)
+
+    def test_packet_data_never_claims_that_no_flows_were_captured(self):
+        device = Device(mitm_installed=True, payload=b"\x2b" * 32)
+        record, _ = self.capture(device, tls_decryption=True)
+        data = record["data"]
+        self.assertFalse(data["empty"])
+        self.assertEqual(data["tls_client_rejection_total"], 0)
+        self.assertFalse(data["no_flows_and_no_rejections"])
+
+    def test_an_incomplete_tail_leaves_the_counts_unknown_and_names_the_next_action(self):
+        cases = ((call_result("", code=1, stderr="error: closed\n"), False),
+                 (call_result("mitmproxy: nothing", omitted_out=4096), True))
+        for result, truncated in cases:
+            with self.subTest(truncated=truncated):
+                device = Device(mitm_installed=True, logcat=LOGCAT_TAIL, logcat_error=result)
+                record, _ = self.capture(device, tls_decryption=True,
+                                         path=f"captures/tail-{int(truncated)}.pcap")
+                data = record["data"]
+                self.assertTrue(data["success"], "a diagnostics miss never fails an observed capture")
+                self.assertIsNone(data["tls_client_rejections"])
+                self.assertIsNone(data["tls_client_rejection_total"])
+                self.assertIsNone(data["no_flows_and_no_rejections"])
+                self.assertFalse(data["tls_logcat"]["observed"])
+                self.assertEqual(data["tls_logcat"]["output_truncated"], truncated)
+                self.assertIn("logcat -d -t 2000", data["tls_logcat"]["reason"])
+                self.assertFalse(any("kill-server" in command for command in device.commands))
+                self.assertNotIn("/_data/v1/app_config", self.stored_text())
+
+    def test_no_logcat_is_read_and_no_rejection_key_is_claimed_without_decryption(self):
+        device = Device(payload=b"\x2c" * 8, logcat=LOGCAT_TAIL)
+        record, _ = self.capture(device)
+        data = record["data"]
+        self.assertEqual(device.logcat_commands(), [])
+        for key in ("tls_client_rejections", "tls_client_rejection_total", "tls_client_rejection_scope",
+                    "tls_logcat", "no_flows_and_no_rejections"):
+            self.assertIsNone(data[key])
+        self.assertNotIn("trust the proxy", self.stored_text())
+        self.assertNotIn("trust the proxy", json.dumps(self.records("capture-session")[0]["data"]))
+
+    def test_a_rejected_window_still_records_the_rejections_it_observed(self):
+        device = Device(mitm_installed=True, header_valid=False, logcat=LOGCAT_TAIL)
+        with self.assertRaisesRegex(ForgeError, "No readable dump file named"):
+            self.capture(device, tls_decryption=True)
+        data = self.rejection()["data"]
+        self.assertEqual(data["tls_client_rejections"], REJECTION_HOSTS)
+        self.assertEqual(data["tls_client_rejection_total"], 4)
+        self.assertEqual(data["tls_logcat"]["lines_read"], LOGCAT_TAIL.count("\n"))
+        self.assertFalse(data["destination_published"])
+        self.assertFalse(data["no_flows_and_no_rejections"], "the tail did name rejections")
+        self.assertFalse(self.records("capture-session")[0]["data"]["success"])
+        self.assertNotIn("/_data/v1/app_config", self.stored_text())
+
+    def test_a_window_that_failed_before_its_stop_claims_no_rejection_count(self):
+        device = Device(mitm_installed=True, consent=False, logcat=LOGCAT_TAIL)
+        with self.assertRaises(ForgeError):
+            self.capture(device, tls_decryption=True, consent_timeout=2)
+        data = self.rejection()["data"]
+        self.assertEqual(device.logcat_commands(), [], "the tail is read only after an observed stop")
+        for key in ("tls_client_rejections", "tls_client_rejection_total", "tls_client_rejection_scope",
+                    "tls_logcat", "no_flows_and_no_rejections"):
+            self.assertIsNone(data[key], key)
 
 
 class PrivacyTests(BaseCase):

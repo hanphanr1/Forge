@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.0 - 2026-10-15
+
+- New `gadget-capture` runs the whole no-root route as one bounded pipeline: Gadget repackage, one-identity signing of base and splits, uninstall/install, MITM preflight, decryption capture with the built-in trust-bypass script attached to the Gadget, flow-dump pull, HAR conversion and import. Each stage records its own evidence; the first failure stops with the next operator action. The trust-bypass script ships in `scripts/`.
+- `flow-to-har` no longer requires mitmproxy: a stdlib tnetstring reader parses dumps (verified frame-identical to mitmproxy on the real Grok and control dumps), `--reader mitmproxy` remains a fallback, and binary bodies are stored base64. gRPC request bodies now import with a `binary_body_omitted` warning instead of failing the exchange.
+- New `grpc-analyze` splits gRPC-web frames and decodes protobuf without a schema into bounded field trees (`1{1:"vi-VN"}`, `1:6,3:"VN",4:2`), with depth/node caps, value withholding to length+SHA-256 and `grpc-status`/`grpc-message` surfaced. On the real Grok dump: 4 gRPC flows decoded, including the RegisterAttestation grpc-status message.
+- `pcapdroid-capture --launch-no-wait` dispatches the scripted launch without `-W` so a wait-mode Gadget cannot hang the window; a dead adb server is restarted once and retried; and after every decryption window the scoped logcat is parsed for mitmproxy's `client does not trust the proxy's certificate` rejections, reported per host so a late trust hook is visible instead of silent zero flows.
+- `android-caller-map` caches per-file results by content hash under `.forge/cache/callers/` (atomic writes, 512 MiB oldest-first eviction, hit/miss counts in the record); reruns on an unchanged tree re-parse nothing.
+
 ## 0.18.0 - 2026-10-15
 
 - New `flow-to-har` converts a mitmproxy flow dump into HAR for the existing `har-import` path. PCAPdroid's TLS decryption writes decrypted requests to mitmproxy, not into the PCAP file, so a capture asked for `--mitmproxy-opts "-w <path>"` now has a supported way in: pull the dump, convert it, import it. mitmproxy is an optional extra (`forge-protocol[flows]`), imported only when a dump is converted, and per-body byte caps plus truncation counts are recorded.

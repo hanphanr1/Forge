@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -134,7 +135,20 @@ def _entry(entry, number, bindings, warnings):
     if not isinstance(post, dict):
         raise ForgeError(prefix + ": postData must be an object")
     if post.get("encoding") is not None:
-        raise ForgeError(prefix + ": encoded/binary request bodies are unsupported")
+        encoding = post.get("encoding")
+        mime = post.get("mimeType", content_type or "")
+        media = mime.split(";", 1)[0].strip().lower() if isinstance(mime, str) else ""
+        if encoding != "base64" or not media.startswith("application/grpc"):
+            raise ForgeError(prefix + ": encoded/binary request bodies are unsupported; re-export the HAR with base64 "
+                                      "gRPC bodies (flow-to-har writes them) or capture a text body instead")
+        try:
+            binary = base64.b64decode(post.get("text", ""), validate=True)
+        except (TypeError, ValueError) as error:
+            raise ForgeError(prefix + ": base64 request body is not decodable") from error
+        warnings.append({"entry": number, "type": "binary_body_omitted",
+                         "message": f"A {len(binary)}-byte gRPC request body was captured but is not replayed; "
+                                    "rebuild that call in the app or add the message schema before replaying."})
+        return spec
     mime = post.get("mimeType", content_type or "")
     if not isinstance(mime, str):
         raise ForgeError(prefix + ": body MIME type must be a string")

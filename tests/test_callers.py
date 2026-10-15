@@ -1,9 +1,13 @@
 import argparse
 import hashlib
+import json
+import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_core import EvidenceStore, ForgeError
@@ -118,7 +122,7 @@ def line_of(text, needle):
     raise AssertionError(f"missing line: {needle}")
 
 
-class AndroidCallerMapTests(unittest.TestCase):
+class _CallerMapFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
@@ -165,6 +169,8 @@ class AndroidCallerMapTests(unittest.TestCase):
         self.assertEqual(len(found), 1, f"expected one {kind} candidate in {name}")
         return found[0]
 
+
+class AndroidCallerMapTests(_CallerMapFixture):
     def test_evidence_validation_matches_android_api_map(self):
         claim = self.store.add("claim", {"text": "not jadx"})
         wrong_tool = self.store.add("analysis", {"tool": "static_index", "path": ".forge/index.jsonl"})
@@ -336,8 +342,8 @@ class AndroidCallerMapTests(unittest.TestCase):
         self.assertTrue(caller["possible_owners_omitted"])
 
     def test_item_cap_reports_truncation_and_walk_order(self):
-        full = self.run_map()
-        capped = self.run_map("--max-items", "1")
+        full = self.run_map("--no-cache")
+        capped = self.run_map("--no-cache", "--max-items", "1")
         self.assertEqual(capped["candidate_count"], 1)
         self.assertEqual(capped["candidates_omitted"], full["candidate_count"] - 1)
         self.assertTrue(capped["truncated"])
@@ -345,17 +351,17 @@ class AndroidCallerMapTests(unittest.TestCase):
         self.assertEqual((capped["files_scanned"], capped["files_omitted"]), (5, 0))
 
     def test_file_and_byte_caps_report_omissions(self):
-        limited = self.run_map("--max-files", "1")
+        limited = self.run_map("--no-cache", "--max-files", "1")
         self.assertEqual(limited["files_scanned"], 1)
         self.assertEqual(limited["files_omitted"], 1)
         self.assertEqual(limited["files_skipped_kt"], 1)
         self.assertTrue(limited["truncated"])
-        tiny = self.run_map("--max-file-bytes", "1")
+        tiny = self.run_map("--no-cache", "--max-file-bytes", "1")
         self.assertEqual((tiny["files_scanned"], tiny["files_omitted"], tiny["candidate_count"]), (0, 5, 0))
         self.assertGreater(tiny["bytes_omitted"], 0)
         self.assertTrue(tiny["truncated"])
         first_size = self.paths["com/example/app/Ambiguous.java"].stat().st_size
-        total = self.run_map("--max-total-bytes", str(first_size))
+        total = self.run_map("--no-cache", "--max-total-bytes", str(first_size))
         self.assertEqual((total["files_scanned"], total["bytes_scanned"]), (1, first_size))
         self.assertEqual(total["files_omitted"], 1)
         self.assertTrue(total["truncated"])
@@ -377,6 +383,207 @@ class AndroidCallerMapTests(unittest.TestCase):
         constructed = self.run_map("--class", "Transport", method="Transport")
         self.assertEqual([candidate["receiver_kind"] for candidate in constructed["candidates"]],
                          ["constructor", "constructor"])
+
+
+class CallerMapCacheTests(_CallerMapFixture):
+    JAVA_SOURCES = ("com/example/app/Ambiguous.java", "com/example/app/Client.java",
+                    "com/example/app/Worker.java", "com/example/net/Transport.java",
+                    "com/example/other/Detached.java")
+
+    def cache_directory(self):
+        return self.store.directory / "cache" / "callers"
+
+    def cache_entries(self):
+        directory = self.cache_directory()
+        if not directory.is_dir():
+            return []
+        return sorted(path for path in directory.iterdir() if path.name != forge_callers.CACHE_INDEX_NAME)
+
+    def entry_for(self, relative):
+        digest = hashlib.sha256(self.paths[relative].read_bytes()).hexdigest()
+        return self.cache_directory() / (digest + ".json")
+
+    def test_first_run_writes_one_entry_per_source_and_reports_counts(self):
+        data = self.run_map()
+        self.assertIs(data["cache_enabled"], True)
+        self.assertEqual(data["cache_dir"], ".forge/cache/callers")
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (0, 5))
+        self.assertEqual(data["cache_writes"], 5)
+        self.assertEqual(data["cache_invalid"], 0)
+        self.assertEqual((data["cache_evicted"], data["cache_evicted_bytes"]), (0, 0))
+        self.assertEqual(data["cache_bytes_reused"], 0)
+        self.assertEqual(data["cache_cap_bytes"], forge_callers.CACHE_CAP_BYTES)
+        entries = self.cache_entries()
+        self.assertEqual(len(entries), 5)
+        index = self.cache_directory() / forge_callers.CACHE_INDEX_NAME
+        self.assertEqual(data["cache_bytes"], sum(path.stat().st_size for path in entries) + index.stat().st_size)
+        source = self.paths["com/example/app/Client.java"]
+        entry = json.loads(self.entry_for("com/example/app/Client.java").read_text(encoding="utf-8"))
+        self.assertEqual(set(entry), {"schema", "sha256", "size", "candidates", "digests", "imports",
+                                      "skipped", "method"})
+        self.assertEqual(entry["schema"], forge_callers.CACHE_SCHEMA)
+        self.assertEqual(entry["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+        self.assertEqual(entry["size"], source.stat().st_size)
+        self.assertEqual(entry["method"], "query")
+        self.assertEqual(entry["digests"]["source_sha256"], entry["sha256"])
+        self.assertEqual(len(entry["digests"]["payload_sha256"]), 64)
+        self.assertEqual(entry["imports"], {"exact": ["com.example.net.Transport"], "simple": ["Transport"],
+                                            "wildcard": []})
+        self.assertEqual(entry["skipped"], {"declarations": 3, "annotations": 0})
+        self.assertEqual([fragment["line"] for fragment in entry["candidates"]],
+                         [candidate["line"] for candidate in self.in_file(data, "Client.java")])
+        for fragment in entry["candidates"]:
+            self.assertEqual(set(fragment), {"line", "receiver_kind", "receiver", "declaration_ambiguous"})
+
+    def test_identical_rerun_reads_no_source_and_yields_identical_candidates(self):
+        first = self.run_map()
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("a source was read again")):
+            second = self.run_map()
+        self.assertEqual(second["candidates"], first["candidates"])
+        self.assertEqual(json.dumps(second["candidates"]), json.dumps(first["candidates"]))
+        self.assertEqual((second["cache_hits"], second["cache_misses"]), (5, 0))
+        self.assertEqual((second["cache_writes"], second["cache_invalid"]), (0, 0))
+        self.assertEqual((second["files_scanned"], second["bytes_scanned"]), (0, 0))
+        self.assertEqual((second["candidate_count"], second["declarations_skipped"],
+                          second["annotation_uses_skipped"]),
+                         (first["candidate_count"], first["declarations_skipped"], first["annotation_uses_skipped"]))
+        self.assertEqual(second["cache_bytes_reused"],
+                         sum(self.paths[name].stat().st_size for name in self.JAVA_SOURCES))
+
+    def test_changed_file_is_reparsed_and_sibling_entries_are_reused(self):
+        first = self.run_map()
+        edited = CLIENT_SOURCE.replace("query(1);", "query(1);\n        query(9);")
+        self.write("com/example/app/Client.java", edited)
+        data = self.run_map()
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (4, 1))
+        self.assertEqual((data["files_scanned"], data["cache_writes"]), (1, 1))
+        self.assertEqual(data["bytes_scanned"],
+                         self.paths["com/example/app/Client.java"].stat().st_size,
+                         "the scanner counts raw disk bytes, including platform newlines")
+        self.assertEqual(data["candidate_count"], first["candidate_count"] + 1)
+        lines = [candidate["line"] for candidate in self.in_file(data, "Client.java")]
+        self.assertIn(line_of(edited, "query(9);"), lines)
+        self.assertEqual(self.in_file(data, "Transport.java"), self.in_file(first, "Transport.java"))
+        entry = json.loads(self.entry_for("com/example/app/Client.java").read_text(encoding="utf-8"))
+        self.assertEqual([fragment["line"] for fragment in entry["candidates"]], lines)
+        self.assertEqual(len(self.cache_entries()), 6)
+
+    def test_no_cache_reruns_every_source_and_writes_nothing(self):
+        first = self.run_map("--no-cache")
+        second = self.run_map("--no-cache")
+        for data in (first, second):
+            self.assertIs(data["cache_enabled"], False)
+            self.assertEqual((data["cache_hits"], data["cache_misses"], data["cache_writes"]), (0, 0, 0))
+            self.assertEqual(data["files_scanned"], 5)
+            self.assertEqual(data["bytes_scanned"],
+                             sum(self.paths[name].stat().st_size for name in self.JAVA_SOURCES))
+            self.assertEqual((data["cache_bytes"], data["cache_bytes_reused"]), (0, 0))
+        self.assertEqual(second["candidates"], first["candidates"])
+        self.assertFalse((self.store.directory / "cache").exists())
+        self.assertIs(self.run_map("--cache")["cache_enabled"], True)
+
+    def test_missing_index_reparses_every_source_without_rewriting_entries(self):
+        first = self.run_map()
+        (self.cache_directory() / forge_callers.CACHE_INDEX_NAME).unlink()
+        data = self.run_map()
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (0, 5))
+        self.assertEqual((data["files_scanned"], data["cache_writes"]), (5, 0))
+        self.assertEqual(data["candidates"], first["candidates"])
+
+    def test_unreadable_entries_are_reported_and_reparsed(self):
+        first = self.run_map()
+        self.entry_for("com/example/app/Worker.java").write_text("{not json", encoding="utf-8")
+        padding = json.dumps({"sha256": "0" * 64, "pad": "x" * (forge_callers.CACHE_ENTRY_FLOOR + 1)})
+        self.entry_for("com/example/other/Detached.java").write_text(padding, encoding="utf-8")
+        data = self.run_map()
+        self.assertEqual(data["cache_invalid"], 2)
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (3, 2))
+        self.assertEqual(data["cache_writes"], 2)
+        self.assertEqual(data["candidates"], first["candidates"])
+
+    def test_identical_content_shares_one_entry_and_keeps_its_own_class_name(self):
+        self.write("com/example/other/Worker.java", WORKER_SOURCE)
+        data = self.run_map(method="Transport")
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (0, 6))
+        self.assertEqual(data["cache_writes"], 5)
+        self.assertEqual(len(self.cache_entries()), 5)
+        self.assertEqual(sorted(candidate["class_name"] for candidate in data["candidates"]
+                                if candidate["file"].endswith("/Worker.java")),
+                         ["com.example.app.Worker", "com.example.other.Worker"])
+
+    def test_method_name_is_part_of_the_cache_key(self):
+        constructors = self.run_map(method="Transport")
+        self.assertEqual((constructors["cache_hits"], constructors["cache_misses"]), (0, 5))
+        queries = self.run_map()
+        self.assertEqual((queries["cache_hits"], queries["cache_misses"]), (0, 5))
+        replayed = self.run_map(method="Transport")
+        self.assertEqual((replayed["cache_hits"], replayed["cache_misses"]), (0, 5))
+        self.assertEqual(replayed["candidates"], constructors["candidates"])
+        self.assertEqual(self.run_map(method="Transport")["cache_hits"], 5)
+
+    def test_cached_receiver_is_promoted_against_the_live_tree(self):
+        first = self.receiver(self.run_map(), "Transport.java", "named_receiver")
+        self.assertEqual(first["receiver"], "helper")
+        self.write("com/example/net/helper.java", "package com.example.net;\n\nclass helper {\n}\n")
+        data = self.run_map()
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (5, 1))
+        promoted = self.receiver(data, "Transport.java", "owner_class")
+        self.assertEqual(promoted["receiver"], "helper")
+        self.assertEqual(promoted["source_sha256"], first["source_sha256"])
+        self.assertEqual(promoted["line"], first["line"])
+
+    def test_bounded_walk_stays_identical_across_cached_reruns(self):
+        first = self.run_map("--max-files", "1")
+        second = self.run_map("--max-files", "1")
+        self.assertEqual((first["files_scanned"], first["files_omitted"]), (1, 1))
+        self.assertEqual((second["files_scanned"], second["cache_hits"], second["files_omitted"]), (0, 1, 1))
+        self.assertEqual(second["candidates"], first["candidates"])
+        self.assertIs(first["truncated"], True)
+        self.assertIs(second["truncated"], True)
+
+    def test_eviction_keeps_the_newest_entries_and_is_reported(self):
+        self.run_map()
+        entries = self.cache_entries()
+        self.assertEqual(len(entries), 5)
+        for index, path in enumerate(entries):
+            stamp = (index + 1) * 1_000_000_000
+            os.utime(path, ns=(stamp, stamp))
+        sizes = [path.stat().st_size for path in entries]
+        index = self.cache_directory() / forge_callers.CACHE_INDEX_NAME
+        cap = index.stat().st_size + sizes[-1] + sizes[-2]
+        with patch.object(forge_callers, "CACHE_CAP_BYTES", cap):
+            data = self.run_map()
+        self.assertEqual((data["cache_hits"], data["cache_misses"]), (5, 0))
+        self.assertEqual(data["cache_evicted"], 3)
+        self.assertEqual(data["cache_evicted_bytes"], sum(sizes[:3]))
+        self.assertEqual(data["cache_cap_bytes"], cap)
+        self.assertLessEqual(data["cache_bytes"], cap)
+        self.assertGreater(data["cache_bytes"], 0)
+        self.assertEqual({path.name for path in self.cache_entries()}, {path.name for path in entries[-2:]})
+        follow = self.run_map()
+        self.assertEqual((follow["cache_hits"], follow["cache_misses"]), (2, 3))
+        self.assertEqual(follow["cache_writes"], 3)
+        self.assertEqual((follow["cache_evicted"], follow["cache_evicted_bytes"]), (0, 0))
+
+    def test_cache_files_never_contain_absolute_paths(self):
+        self.run_map()
+        directory = self.cache_directory()
+        for path in sorted(directory.iterdir()):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(str(self.root), text)
+            self.assertNotIn(self.root.as_posix(), text)
+            self.assertIsNone(re.search(r"[A-Za-z]:[\\/]", text), path.name)
+        index = json.loads((directory / forge_callers.CACHE_INDEX_NAME).read_text(encoding="utf-8"))
+        keys = sorted(index["entries"])
+        self.assertEqual(len(keys), 5)
+        for key in keys:
+            self.assertFalse(Path(key).is_absolute())
+            self.assertFalse(key.startswith("/"))
+            self.assertNotIn(":", key)
+            self.assertTrue(key.startswith(".forge/analysis/"))
+            self.assertTrue(key.endswith(".java"))
+        self.assertEqual({value["method"] for value in index["entries"].values()}, {"query"})
+        self.assertEqual({len(value["sha256"]) for value in index["entries"].values()}, {64})
 
 
 if __name__ == "__main__":

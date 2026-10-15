@@ -42,10 +42,10 @@ _ENUMS = {
                "install-multiple", "preflight", "pull", "push", "pull-package", "observe", "packages", "package",
                "frida-prerequisite", "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices",
                "ios-pair", "decompile", "api-map", "capture", "pcap-analyze", "caller-map",
-               "capture-session", "capture-rejected", "flow-to-har"},
+               "capture-session", "capture-rejected", "flow-to-har", "grpc-analyze", "gadget-capture"},
     "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
                "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1", "forge.flows/v1",
-               "forge.android-caller-map/v1"},
+               "forge.android-caller-map/v1", "forge.grpc/v1", "forge.gadget/v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
                "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
                "observed", "paired", "not-paired", "unknown"},
@@ -62,8 +62,10 @@ _PRIVATE |= {"hostname", "source_ip", "destination_ip", "uid", "package_hint", "
              "remote_name", "api_key", "api_key_env", "collector_host"}
 _FLAGS |= {"decryption_performed", "capture_started_observed", "capture_stopped_observed",
            "package_hint_truncated", "decryption_requested",
-           "operator_approved_tls_decryption", "attempted", "overload_aware", "declaration_ambiguous",
-           "possible_owners_omitted", "http_methods_omitted", "http_paths_omitted"}
+           "possible_owners_omitted", "http_methods_omitted", "http_paths_omitted",
+           "wait_for_launch", "adb_server_restarted", "retried_once", "launch_no_wait",
+           "no_flows_and_no_rejections", "dump_truncated", "values_withheld", "grpc",
+           "request_frames_truncated", "response_frames_truncated", "cache_enabled"}
 _NUMBERS |= {"packets_scanned", "malformed_packets", "unsupported_packets", "packet_index",
              "timestamp", "source_port", "destination_port", "hosts_omitted",
              "flows_omitted", "host_observations_omitted", "captured_packet_truncations"}
@@ -75,11 +77,22 @@ _NUMBERS |= {"packets_scanned", "malformed_packets", "unsupported_packets", "pac
              "gap_seconds", "seconds", "max_bytes", "window_index", "window_count", "index",
              "candidates_omitted", "candidates_filtered", "declarations_skipped",
              "annotation_uses_skipped", "files_enumerated", "files_scanned", "files_skipped_kt",
-             "files_omitted", "bytes_scanned", "bytes_omitted"}
+             "files_omitted", "bytes_scanned", "bytes_omitted", "tls_client_rejection_total",
+             "frames_read", "frames_skipped", "dump_bytes", "bodies_encoded", "grpc_flows",
+             "skipped_websocket", "skipped_non_grpc", "request_frames", "response_frames",
+             "trailer_frames", "compressed_frames", "undecodable_frames",
+             "flows_with_truncated_frames", "frames_capped", "nodes", "nodes_capped", "depth_capped",
+             "withheld_values", "nodes_cap", "depth_cap", "value_chars_cap", "frames_cap", "grpc_status",
+             "cache_hits", "cache_misses", "cache_writes", "cache_invalid", "cache_evicted",
+             "cache_evicted_bytes", "cache_bytes", "cache_bytes_reused", "cache_cap_bytes",
+             "endpoints_hint", "hooks_observed", "polls", "attach_seconds",
+             "budget_seconds", "elapsed_seconds"}
 _CONTAINERS |= {"capture", "hosts", "flows", "static_host_matches", "windows", "failures",
                 "force_stop_action", "launch_action", "service_precheck", "service_after_session",
-                "decryption_basis"}
-_SAFE_STRINGS |= {"http_methods"}
+                "decryption_basis", "adb_server_restart", "tls_logcat", "flows_detail", "stages"}
+_SAFE_STRINGS |= {"reader"}
+_PRIVATE |= {"request_fields", "response_fields", "grpc_message", "cache_dir", "trigger",
+             "parse_error", "hosts", "stage"}
 _PRIVATE |= {"file", "receiver", "http_paths", "decryption_scope"}
 _FLAGS |= {"extract_native_libs_enabled"}
 _CONTAINERS |= {"so_page_alignment"}

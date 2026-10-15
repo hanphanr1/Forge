@@ -7,10 +7,17 @@ scoped CaptureService observation and the unique dump file were observed to star
 stop was observed to take that service down, and a new private PCAP file was retrieved
 and hashed. No root, emulator or app preference access is used.
 
-Two opt-ins extend that path without changing its guarantees. ``--tls-decryption`` asks
+Three opt-ins extend that path without changing its guarantees. ``--tls-decryption`` asks
 PCAPdroid for its own decryption mode; FORGE installs no CA and decrypts nothing itself.
 ``--repeat`` runs several bounded windows in one session, each with its own dump file and
 its own evidence record, plus one capture-session record over all of them.
+``--launch-no-wait`` dispatches the scripted launch as a plain ``am start -n`` so an app
+that blocks in a wait mode (Gadget wait, first-run onboarding) cannot hang the window; the
+launch action evidence records which shape was sent. Every ``--tls-decryption`` window that
+observed its stop then reads the bounded scoped ``mitmproxy`` logcat tail and counts client
+TLS rejections per host, which turns the classic late-trust-hook failure from a silent empty
+dump into a named one. A device call that reports the configured ADB server gone may restart
+that server once, and the window/session evidence records when it happened.
 """
 
 from __future__ import annotations
@@ -80,6 +87,22 @@ AM_WARNING = re.compile(r"(?m)^\s*Warning:.*$")
 DIGITS = re.compile(r"[0-9]+\Z")
 VERSION_NAME = re.compile(r"\bversionName=(\S+)")
 VERSION_CODE = re.compile(r"\bversionCode=([0-9]+)")
+# ADB-server death signatures. Only these allow the one-shot restart retry: every other
+# failure (usage error, missing file, denied intent) is returned exactly as observed.
+ADB_SERVER_GONE = re.compile(
+    r"device\s+'?[A-Za-z0-9._:-]*'?\s*not\s+found|device\s+offline\b|device\s+disconnected\b|"
+    r"no\s+devices?/emulators?\s+found|failed\s+to\s+start\s+daemon\b|server\s+didn'?t\s+ACK\b|"
+    r"couldn'?t\s+connect\s+to\s+adb\s+server\b|adb\s+server\s+version[^\n]*?(?:doesn'?t\s+match|is\s+out\s+of\s+date)",
+    re.IGNORECASE)
+# The addon logs its own handshake failures under this tag; the tail read never leaves the
+# tag, and only the host named in that line is counted. The whitespace runs also cover a
+# message that Android or the tool prefix wrapped onto the next line.
+LOGCAT_TAG = "mitmproxy"
+LOGCAT_TAIL_LINES = 2000
+TLS_REJECTION = re.compile(r"does not trust the proxy'?s\s{1,8}certificate"
+                           r"(?:\s{1,8}for\s{1,8}([A-Za-z0-9._-]+))?")
+UNATTRIBUTED_HOST = "(host-not-logged)"
+MAX_RESTART_PREVIEW = 300
 REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 _EMPTY_SERVICE_OUTPUT = "(nothing)"
 
@@ -90,6 +113,17 @@ _DECRYPTION_SCOPE = ("TLS decryption is requested through PCAPdroid's own settin
                      "is never evidence that a given flow was decrypted.")
 _DECRYPTION_LIMIT = ("--tls-decryption is a request, not decryption: without the operator-installed PCAPdroid CA, "
                      "without app trust or with certificate pinning the captured flows stay encrypted")
+_TLS_REJECTION_SCOPE = (
+    "Client TLS rejections are counted per host name — host names only, never URLs, paths or headers — from the "
+    "bounded scoped logcat tail of the addon tag "
+    f"`{LOGCAT_TAG}` only, read right after this window's stop: a rejection means the app refused the certificate "
+    "the addon offered, which happens when the trust bypass was not active before the client built its TLS context "
+    "(or when the app pins its own certificate), so those connections stay encrypted even though --tls-decryption "
+    "was requested. Only host names are recorded, never URLs, paths or headers, and rejections the addon did not "
+    "log or that scrolled past that tail are not counted. no_flows_and_no_rejections is true only when this "
+    "window's dump held no packet data past the PCAP global header and this tail held no rejection at all.")
+_REJECTION_LIMIT = ("TLS client rejections come from one bounded logcat tail of the addon tag: the count is a lower "
+                    "bound for the window and names hosts only")
 MITM_PACKAGE = "com.pcapdroid.mitm"
 MITM_REPOSITORY = "https://github.com/emanuele-f/PCAPdroid-mitm"
 _SCOPE = ("Rootless PCAPdroid capture control through its documented Intent API only. Recorded evidence covers ADB "
@@ -104,11 +138,16 @@ _LIMITS = [
     "The device max_dump_size may overshoot by the last packet and packet extensions; the host retrieval cap is authoritative",
     "Packet-level hosts, flows and app-filter correctness stay analysis-time claims; dump UID/package metadata is not independent attestation",
     "Raw PCAP bytes are never printed, exported or summarised by this command",
+    "The one-shot ADB server restart is recorded from the failing call's own output and the restart attempt only; "
+    "it is not proof that the server death caused the reported failure",
 ]
 
 
 def _limits(options):
-    return _LIMITS + ([_DECRYPTION_LIMIT] if options["tls_decryption"] else [])
+    limits = list(_LIMITS)
+    if options["tls_decryption"]:
+        limits += [_DECRYPTION_LIMIT, _REJECTION_LIMIT]
+    return limits
 
 
 def _run(command, timeout, binary=False):
@@ -155,10 +194,97 @@ def _bounded_call(call, limit=8192):
     return stored
 
 
+def _stream_text(value):
+    """Text of one captured stream; a binary capture is decoded lossily for diagnostics."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value if isinstance(value, str) else ""
+
+
+def _call_text(call):
+    return _stream_text(call["stdout"]) + "\n" + _stream_text(call["stderr"])
+
+
+def _first_line(text, limit=200):
+    for line in text.splitlines():
+        if line.strip():
+            return line.strip()[:limit]
+    return None
+
+
+def _adb_server_gone(call):
+    """True only for an ADB-server death signature; nothing else is ever retried."""
+    if call["returncode"] == 0 or call["timed_out"] or call["launch_error"] is not None:
+        return False
+    return bool(ADB_SERVER_GONE.search(_call_text(call)))
+
+
+def _scrubbed_call(call, secrets, limit=MAX_RESTART_PREVIEW):
+    """Bounded, secret-free preview of one ADB invocation; any trim is reported."""
+    stored = {"returncode": call["returncode"], "timed_out": call["timed_out"],
+              "launch_error": scrub_text(str(call["launch_error"]), secrets) if call["launch_error"] else None,
+              "stdout_omitted_bytes": call["stdout_omitted_bytes"],
+              "stderr_omitted_bytes": call["stderr_omitted_bytes"], "output_truncated": False}
+    for name in ("stdout", "stderr"):
+        text = scrub_text(_stream_text(call[name]), secrets)
+        if len(text) > limit:
+            text, stored["output_truncated"] = text[:limit], True
+        stored[name] = text
+    return stored
+
+
+class _AdbServer:
+    """Configured ADB path, session secrets and the one-shot restart latch.
+
+    One instance serves one preflight or one capture session. The first device call that
+    reports the server gone (`device ... not found`, `offline`, `device disconnected`)
+    triggers `adb kill-server` + `adb start-server` and retries exactly that call; every
+    other failure is returned as observed, and a later dead-server answer in the same run is
+    never retried again.
+    """
+
+    def __init__(self, adb, secrets=()):
+        self.adb = adb
+        self.secrets = tuple(item for item in secrets if item)
+        self.restarted = False
+        self.restart_evidence = None
+
+    def with_secrets(self, secrets):
+        """Add the session's secret spellings before a call whose output may echo them."""
+        self.secrets = tuple(item for item in secrets if item)
+        return self
+
+    def run(self, command, timeout, binary=False):
+        call = _run(command, timeout, binary=binary)
+        if self.restarted or not _adb_server_gone(call):
+            return call
+        self.restart(call)
+        return _run(command, timeout, binary=binary)
+
+    def restart(self, failing):
+        """Restart the configured server once and keep the attempts as scrubbed evidence."""
+        kill = _run([self.adb, "kill-server"], PREFLIGHT_TIMEOUT)
+        start = _run([self.adb, "start-server"], PREFLIGHT_TIMEOUT)
+        trigger = _first_line(scrub_text(_call_text(failing), self.secrets))
+        self.restarted = True
+        self.restart_evidence = {"trigger": trigger, "retried_once": True,
+                                 "kill_server": _scrubbed_call(kill, self.secrets),
+                                 "start_server": _scrubbed_call(start, self.secrets)}
+        print(f"forge pcapdroid: the ADB server reported the device gone ({trigger or 'no output'}); restarted it "
+              f"once with `adb kill-server` + `adb start-server` and retried the call", file=sys.stderr, flush=True)
+
+
+def _restart_state(latch, before=False):
+    """Window/session restart evidence; `before` makes the flag mean 'during this window'."""
+    restarted = bool(latch is not None and latch.restarted)
+    fresh = restarted and not before
+    return {"adb_server_restarted": fresh, "adb_server_restart": latch.restart_evidence if fresh else None}
+
+
 # --------------------------------------------------------------------------- facts
 
-def _devices(adb):
-    listing = _run([adb, "devices", "-l"], PREFLIGHT_TIMEOUT)
+def _devices(adb, latch):
+    listing = latch.run([adb, "devices", "-l"], PREFLIGHT_TIMEOUT)
     devices = []
     if _ok(listing) and not listing["stdout_omitted_bytes"]:
         for line in listing["stdout"].splitlines():
@@ -168,10 +294,11 @@ def _devices(adb):
     return listing, devices
 
 
-def _package_facts(adb, serial, package, timeout=PREFLIGHT_TIMEOUT):
-    path_call = _run([adb, "-s", serial, "shell", "pm", "path", package], timeout)
-    detail_call = _run([adb, "-s", serial, "shell", "dumpsys", "package", package], timeout)
-    uid_call = _run([adb, "-s", serial, "shell", "pm", "list", "packages", "-U", "--user", "current", package], timeout)
+def _package_facts(adb, serial, package, latch, timeout=PREFLIGHT_TIMEOUT):
+    path_call = latch.run([adb, "-s", serial, "shell", "pm", "path", package], timeout)
+    detail_call = latch.run([adb, "-s", serial, "shell", "dumpsys", "package", package], timeout)
+    uid_call = latch.run([adb, "-s", serial, "shell", "pm", "list", "packages", "-U", "--user", "current", package],
+                         timeout)
     # The scoped `dumpsys package` detail is the authority for installed-ness: `pm path`
     # exit codes vary between Android versions for an absent package.
     observed = _complete(detail_call)
@@ -224,19 +351,19 @@ def _service_state(call):
     return state
 
 
-def _service_call(adb, serial, timeout):
-    return _service_state(_run([adb, "-s", serial, "shell", "dumpsys", "activity", "services", CAPTURE_PACKAGE],
-                               timeout))
+def _service_call(adb, serial, timeout, latch):
+    return _service_state(latch.run([adb, "-s", serial, "shell", "dumpsys", "activity", "services", CAPTURE_PACKAGE],
+                                    timeout))
 
 
-def _device_file(adb, serial, remote, timeout):
+def _device_file(adb, serial, remote, timeout, latch):
     """Observe the generated dump file only: size, then the first PCAP header bytes."""
-    size_call = _run([adb, "-s", serial, "shell", "stat", "-c", "%s", remote], timeout)
+    size_call = latch.run([adb, "-s", serial, "shell", "stat", "-c", "%s", remote], timeout)
     size = None
     if _complete(size_call) and DIGITS.fullmatch(size_call["stdout"].strip()):
         size = int(size_call["stdout"].strip())
     if size is None:
-        listing = _run([adb, "-s", serial, "shell", "ls", "-ln", remote], timeout)
+        listing = latch.run([adb, "-s", serial, "shell", "ls", "-ln", remote], timeout)
         fields = _text(listing["stdout"]).split()
         if _complete(listing) and len(fields) >= 5 and fields[0].startswith("-") and DIGITS.fullmatch(fields[4]):
             size = int(fields[4])
@@ -245,10 +372,11 @@ def _device_file(adb, serial, remote, timeout):
             return {"known": False, "exists": None, "size": None, "header_valid": False, "magic": None,
                     "reason": "Device dump file state was not observed completely"}
         return {"known": True, "exists": False, "size": None, "header_valid": False, "magic": None, "reason": None}
-    header_call = _run([adb, "-s", serial, "exec-out", "head", "-c", str(HEADER_BYTES), remote], timeout, binary=True)
+    header_call = latch.run([adb, "-s", serial, "exec-out", "head", "-c", str(HEADER_BYTES), remote], timeout,
+                            binary=True)
     if not _ok(header_call):
-        header_call = _run([adb, "-s", serial, "exec-out", "toybox", "head", "-c", str(HEADER_BYTES), remote],
-                           timeout, binary=True)
+        header_call = latch.run([adb, "-s", serial, "exec-out", "toybox", "head", "-c", str(HEADER_BYTES), remote],
+                                timeout, binary=True)
     data = header_call["stdout"] if isinstance(header_call["stdout"], bytes) else b""
     return {"known": True, "exists": True, "size": size, "header_valid": len(data) >= HEADER_BYTES and data[:4] in PCAP_MAGIC,
             "magic": data[:4].hex() if len(data) >= 4 else None,
@@ -256,6 +384,7 @@ def _device_file(adb, serial, remote, timeout):
 
 
 def _preflight(serial=None, package=None):
+    """Observed facts plus the ADB-server latch that served them; the latch is None without ADB."""
     result = {"schema": SCHEMA, "tool": TOOL, "action": "preflight", "success": False, "status": "missing-tool",
               "requested_serial": serial, "requested_package": package, "devices": [], "device": None,
               "capture_package": None, "target_package": None, "service": None, "capture_running": None,
@@ -265,54 +394,55 @@ def _preflight(serial=None, package=None):
         adb = executable("adb")
     except ForgeError as error:
         result["precondition"] = str(error)
-        return result
+        return result, None
     result["adb_path"] = adb
-    version = _run([adb, "version"], PREFLIGHT_TIMEOUT)
-    listing, devices = _devices(adb)
+    latch = _AdbServer(adb)
+    version = latch.run([adb, "version"], PREFLIGHT_TIMEOUT)
+    listing, devices = _devices(adb, latch)
     result["calls"] = {"tool_version": _bounded_call(version), "device_listing": _bounded_call(listing)}
     result["devices"] = devices
     if not _ok(version) or not _ok(listing) or listing["stdout_omitted_bytes"]:
         result["status"] = "adb-failed"
         result["precondition"] = "Configured ADB must report its version and a complete device listing"
-        return result
+        return result, latch
     status, device = select_device(devices, serial)
     result["device"] = device
     if status != "authorized":
         result["status"] = status
         result["precondition"] = ("Connect and authorize an owned Android device; select --serial when selection is "
                                   "ambiguous")
-        return result
+        return result, latch
     adb_serial = device["serial"]
-    capture_package = _package_facts(adb, adb_serial, CAPTURE_PACKAGE)
+    capture_package = _package_facts(adb, adb_serial, CAPTURE_PACKAGE, latch)
     result["capture_package"] = capture_package
     if not capture_package["observed"]:
         result["status"] = "capture-app-unknown"
         result["precondition"] = "Installed PCAPdroid facts must be observed completely; no root or preference access is used"
-        return result
+        return result, latch
     if not capture_package["installed"]:
         result["status"] = "capture-app-absent"
         result["precondition"] = "Install PCAPdroid from its official distribution; this command never adds a companion APK"
-        return result
-    service = _service_call(adb, adb_serial, PREFLIGHT_TIMEOUT)
+        return result, latch
+    service = _service_call(adb, adb_serial, PREFLIGHT_TIMEOUT, latch)
     result["service"] = service
     if not service["known"]:
         result["status"] = "service-unknown"
         result["precondition"] = ("The scoped CaptureService state must be observed completely before a bounded capture "
                                   "can be refused or started")
-        return result
+        return result, latch
     result["capture_running"] = service["running"]
-    result["mitm_addon"] = _mitm_facts(adb, adb_serial)
+    result["mitm_addon"] = _mitm_facts(adb, adb_serial, latch)
     if package is not None:
-        target_package = _package_facts(adb, adb_serial, package)
+        target_package = _package_facts(adb, adb_serial, package, latch)
         result["target_package"] = target_package
         if not target_package["observed"]:
             result["status"] = "target-app-unknown"
             result["precondition"] = f"Installed facts for {package} must be observed completely"
-            return result
+            return result, latch
         if not target_package["installed"]:
             result["status"] = "target-app-absent"
             result["precondition"] = f"{package} is not installed on the selected device"
-            return result
+            return result, latch
     result["success"] = True
     if service["running"]:
         result["status"] = "capture-active"
@@ -320,12 +450,12 @@ def _preflight(serial=None, package=None):
                                   "bounded session")
     else:
         result["status"] = "ready"
-    return result
+    return result, latch
 
 
-def _mitm_facts(adb, serial):
+def _mitm_facts(adb, serial, latch):
     """One scoped package query: the decryption addon is a separate app the operator installs."""
-    detail = _run([adb, "-s", serial, "shell", "dumpsys", "package", MITM_PACKAGE], PREFLIGHT_TIMEOUT)
+    detail = latch.run([adb, "-s", serial, "shell", "dumpsys", "package", MITM_PACKAGE], PREFLIGHT_TIMEOUT)
     observed = _complete(detail)
     text = _text(detail["stdout"])
     version_name, version_code = VERSION_NAME.search(text), VERSION_CODE.search(text)
@@ -376,7 +506,7 @@ def _capture_options(args):
     if type(gap) not in (int, float) or not 0 <= gap <= MAX_GAP_SECONDS:
         raise ForgeError(f"--gap must be a number of seconds between 0 and {MAX_GAP_SECONDS}")
     for name, label in (("force_stop", "--force-stop"), ("tls_decryption", "--tls-decryption"),
-                        ("continue_on_error", "--continue-on-error")):
+                        ("continue_on_error", "--continue-on-error"), ("launch_no_wait", "--launch-no-wait")):
         if type(getattr(args, name, False)) is not bool:
             raise ForgeError(f"{label} is a flag and takes no value")
     mitmproxy_opts = (getattr(args, "mitmproxy_opts", None) or "").strip()
@@ -392,9 +522,14 @@ def _capture_options(args):
     package = getattr(args, "package", None)
     if not isinstance(package, str) or not PACKAGE_NAME.fullmatch(package):
         raise ForgeError("Provide a valid --package name, for example ai.x.grok")
+    launch = _launch_value(getattr(args, "launch", None))
+    launch_no_wait = getattr(args, "launch_no_wait", False)
+    if launch_no_wait and not launch:
+        raise ForgeError("--launch-no-wait only applies with --launch")
     return {"seconds": args.seconds, "consent_timeout": args.consent_timeout, "timeout": args.timeout,
             "max_bytes": args.max_bytes, "package": package, "repeat": repeat, "gap": gap,
-            "launch": _launch_value(getattr(args, "launch", None)), "force_stop": getattr(args, "force_stop", False),
+            "launch": launch, "force_stop": getattr(args, "force_stop", False),
+            "launch_no_wait": launch_no_wait,
             "tls_decryption": getattr(args, "tls_decryption", False),
             "serial": _serial_value(getattr(args, "serial", None), "--serial"),
             "continue_on_error": getattr(args, "continue_on_error", False),
@@ -593,7 +728,7 @@ def _error_line(text):
     return None
 
 
-def _await_start(adb, serial, remote, options):
+def _await_start(adb, serial, remote, options, latch):
     """Poll boundedly for the scoped service and the unique dump file.
 
     PCAPdroid creates the dump file when the capture starts but may write the classic
@@ -606,8 +741,8 @@ def _await_start(adb, serial, remote, options):
     polls, service, file_fact = 0, None, None
     while True:
         polls += 1
-        service = _service_call(adb, serial, options["timeout"])
-        file_fact = _device_file(adb, serial, remote, options["timeout"])
+        service = _service_call(adb, serial, options["timeout"], latch)
+        file_fact = _device_file(adb, serial, remote, options["timeout"], latch)
         running = service["known"] and service["running"] is True
         if running and file_fact["exists"]:
             return _start_facts(service, file_fact, polls, started, complete=True)
@@ -627,18 +762,18 @@ def _start_facts(service, file_fact, polls, started, complete):
             "consent_pending": not (running and created), "service": service, "file": file_fact}
 
 
-def _observe(adb, serial, remote, timeout):
-    service = _service_call(adb, serial, timeout)
-    return {"service": service, "file": _device_file(adb, serial, remote, timeout),
+def _observe(adb, serial, remote, timeout, latch):
+    service = _service_call(adb, serial, timeout, latch)
+    return {"service": service, "file": _device_file(adb, serial, remote, timeout, latch),
             "still_running": service["known"] and service["running"] is True}
 
 
-def _stop_session(adb, serial, options, key, secrets):
+def _stop_session(adb, serial, options, key, secrets, latch):
     """Ask PCAPdroid to stop, then poll boundedly for the observed service termination."""
     command = _intent_command(adb, serial, "stop", key)
     print(f"forge pcapdroid-capture: stopping the capture now; if PCAPdroid asks for stop consent, approve it on the "
           f"device within {options['timeout']}s", file=sys.stderr, flush=True)
-    dispatch = _dispatch(_run(_dispatch_command(command, key), options["timeout"]), secrets)
+    dispatch = _dispatch(latch.run(_dispatch_command(command, key), options["timeout"]), secrets)
     result = {"requested": True, "dispatch": dispatch, "observed_stopped": False, "polls": 0, "service": None,
               "command": list(command)}
     if not dispatch["accepted"]:
@@ -647,7 +782,7 @@ def _stop_session(adb, serial, options, key, secrets):
     deadline = time.monotonic() + options["timeout"]
     while True:
         result["polls"] += 1
-        result["service"] = _service_call(adb, serial, options["timeout"])
+        result["service"] = _service_call(adb, serial, options["timeout"], latch)
         if result["service"]["known"] and result["service"]["running"] is False:
             result["observed_stopped"] = True
             break
@@ -659,15 +794,15 @@ def _stop_session(adb, serial, options, key, secrets):
     return result
 
 
-def _settled_file(adb, serial, remote, options):
+def _settled_file(adb, serial, remote, options, latch):
     """Bounded settle for the finalized dump: PCAPdroid may write the header only at stop."""
     deadline = time.monotonic() + min(options["timeout"], SETTLE_SECONDS)
-    observed = _device_file(adb, serial, remote, options["timeout"])
+    observed = _device_file(adb, serial, remote, options["timeout"], latch)
     while not (observed["exists"] and observed["header_valid"]):
         if time.monotonic() >= deadline:
             break
         time.sleep(POLL_SECONDS)
-        observed = _device_file(adb, serial, remote, options["timeout"])
+        observed = _device_file(adb, serial, remote, options["timeout"], latch)
     return observed
 
 
@@ -706,12 +841,12 @@ def _pcap_header(data):
             "ethernet_link_type": link_type == 1, "nanosecond_timestamps": data[:4] in NANOSECOND_MAGIC}
 
 
-def _retrieve(adb, serial, remote, destination, options, device_size):
+def _retrieve(adb, serial, remote, destination, options, device_size, latch):
     if device_size is None or device_size > options["max_bytes"]:
         raise ForgeError(f"The device dump exceeds --max-bytes ({options['max_bytes']}); nothing was pulled")
     with tempfile.TemporaryDirectory(prefix="forge-pcapdroid-", dir=str(destination.parent)) as staging:
         target = Path(staging) / "capture.pcap"
-        call = _run([adb, "-s", serial, "pull", remote, str(target)], options["timeout"])
+        call = latch.run([adb, "-s", serial, "pull", remote, str(target)], options["timeout"])
         if not _complete(call) or call["returncode"] != 0:
             detail = _text(call["stderr"]).strip().splitlines()
             raise ForgeError("ADB could not pull the capture file"
@@ -735,6 +870,68 @@ def _retrieve(adb, serial, remote, destination, options, device_size):
             raise ForgeError(f"Atomic PCAP publication requires hard-link support: {error}") from error
         return {"sha256": digest, "size": size, "device_size": device_size, "header": header,
                 "empty": size == HEADER_BYTES, "max_dump_size_reached": size >= options["max_bytes"]}
+
+
+# --------------------------------------------------------------- decryption diagnostics
+
+def _packet_data_state(dump=None, retrieval=None):
+    """Whether the window's dump holds bytes past the PCAP global header.
+
+    True means packet data was observed, False means the dump was observed and held none
+    (absent, header-only or unreadable), and None means it was not observed completely.
+    """
+    if isinstance(retrieval, dict):
+        return not retrieval["empty"]
+    fact = dump if isinstance(dump, dict) else {}
+    if not fact.get("known"):
+        return None
+    if not fact.get("exists"):
+        return False
+    size = fact.get("size")
+    return None if size is None else size > HEADER_BYTES
+
+
+def _tls_diagnostics(adb, serial, options, latch):
+    """One bounded, scoped addon-logcat tail; the log text itself is never recorded.
+
+    Only the ``mitmproxy`` tag is read and only the host names in the addon's own
+    handshake-failure lines are counted, so no URL, path or header value the addon logged
+    can reach evidence. An incomplete tail leaves the counts unknown rather than claiming
+    zero rejections.
+    """
+    command = [adb, "-s", serial, "logcat", "-d", "-t", str(LOGCAT_TAIL_LINES), "-s", LOGCAT_TAG + ":*"]
+    call = latch.run(command, options["timeout"])
+    observed = _complete(call)
+    text = _stream_text(call["stdout"])
+    hosts = {}
+    if observed:
+        for match in TLS_REJECTION.finditer(text):
+            host = (match.group(1) or "").rstrip(".").lower() or UNATTRIBUTED_HOST
+            hosts[host] = hosts.get(host, 0) + 1
+    omitted = call["stdout_omitted_bytes"] + call["stderr_omitted_bytes"]
+    return {"tag": LOGCAT_TAG, "tail_lines": LOGCAT_TAIL_LINES, "observed": observed,
+            "lines_read": len(text.splitlines()) if observed else None,
+            "output_truncated": bool(omitted), "omitted_bytes": omitted,
+            "hosts": hosts if observed else None, "total": sum(hosts.values()) if observed else None,
+            "reason": None if observed else
+            (f"The scoped addon logcat tail was not observed completely; run `adb logcat -d -t {LOGCAT_TAIL_LINES} "
+             f"-s {LOGCAT_TAG}:*` while the target app fails its handshake, then retry")}
+
+
+def _tls_fields(tls, packet_data):
+    """The window's TLS rejection keys; every value stays None when decryption was not requested."""
+    if tls is None:
+        return {"tls_client_rejections": None, "tls_client_rejection_total": None,
+                "tls_client_rejection_scope": None, "tls_logcat": None,
+                "no_flows_and_no_rejections": None}
+    total, hosts = tls["total"], tls["hosts"]
+    unknown = total is None or packet_data is None
+    return {"tls_client_rejections": dict(hosts) if hosts is not None else None,
+            "tls_client_rejection_total": total,
+            "tls_client_rejection_scope": _TLS_REJECTION_SCOPE,
+            "tls_logcat": {key: tls[key] for key in ("tag", "tail_lines", "lines_read", "output_truncated",
+                                                     "omitted_bytes", "observed", "reason")},
+            "no_flows_and_no_rejections": None if unknown else (total == 0 and packet_data is False)}
 
 
 def _stop_detail(stop):
@@ -783,7 +980,8 @@ def pcapdroid_preflight(args, store):
     package = getattr(args, "package", None)
     if package is not None and (not isinstance(package, str) or not PACKAGE_NAME.fullmatch(package)):
         raise ForgeError("Provide a valid --package name for the observed target app")
-    return store.add("runtime", _preflight(_serial_value(getattr(args, "serial", None), "--serial"), package))
+    facts, latch = _preflight(_serial_value(getattr(args, "serial", None), "--serial"), package)
+    return store.add("runtime", {**facts, **_restart_state(latch)})
 
 
 def _gap(seconds):
@@ -795,23 +993,35 @@ def _gap(seconds):
         time.sleep(min(POLL_SECONDS, remaining))
 
 
-def _action_dispatch(label, command, options, secrets):
+def _action_dispatch(label, command, options, secrets, latch):
     """Dispatch one scripted app action; acceptance stays a dispatch observation."""
-    dispatch = _dispatch(_run(command, options["timeout"]), secrets)
+    dispatch = _dispatch(latch.run(command, options["timeout"]), secrets)
     dispatch["action"] = label
     dispatch["command"] = list(command)
     return dispatch
 
 
-def _scripted_actions(adb, serial, options, secrets):
+def _launch_command(adb, serial, options):
+    """`am start` for the scripted launch; `-W` waits for the Activity and is the default.
+
+    `--launch-no-wait` drops `-W`, because an app that blocks in a Gadget wait mode never
+    returns an Activity result and would hold the window until the ADB timeout.
+    """
+    command = [adb, "-s", serial, "shell", "am", "start"]
+    if not options["launch_no_wait"]:
+        command.append("-W")
+    return command + ["-n", options["launch"]]
+
+
+def _scripted_actions(adb, serial, options, secrets, latch):
     """Send the configured per-window app actions: force-stop of the target package first, then the launch."""
     force_stop = launch = None
     if options["force_stop"]:
         force_stop = _action_dispatch("force-stop", [adb, "-s", serial, "shell", "am", "force-stop",
-                                                     options["package"]], options, secrets)
+                                                     options["package"]], options, secrets, latch)
     if options["launch"]:
-        launch = _action_dispatch("launch", [adb, "-s", serial, "shell", "am", "start", "-W", "-n",
-                                            options["launch"]], options, secrets)
+        launch = _action_dispatch("launch", _launch_command(adb, serial, options), options, secrets, latch)
+        launch["wait_for_launch"] = not options["launch_no_wait"]
     return force_stop, launch
 
 
@@ -838,7 +1048,7 @@ def _window_summary(store, index, destination, *, attempted, success, name=None,
 
 def _window_failure(store, options, environment, secrets, index, count, destination, preflight_id, error, name=None,
                     remote=None, settings=None, dispatch=None, start=None, stop=None, window_end=None, dump=None,
-                    force_stop=None, launch=None, precheck=None):
+                    force_stop=None, launch=None, precheck=None, restart=None, tls=None):
     """Store the per-window rejection first, so a mid-session stop keeps the completed windows intact."""
     message = scrub_text(str(error), secrets)
     required = _required_action(dispatch, start, stop, dump)
@@ -852,6 +1062,8 @@ def _window_failure(store, options, environment, secrets, index, count, destinat
         "dispatch": dispatch, "start": start, "stop": stop, "window_end": window_end, "dump": dump,
         "force_stop_action": force_stop, "launch_action": launch, "service_precheck": precheck,
         "retrieval": {"pulled": False, "published": False}, "preflight_evidence_id": preflight_id,
+        **(restart if restart is not None else _restart_state(None)),
+        **(tls if tls is not None else _tls_fields(None, None)),
         "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
         "decryption_scope": _DECRYPTION_SCOPE if decryption else None,
         "proof": {"activity_result_available": False, "get_status_extras_used": False},
@@ -863,29 +1075,34 @@ def _window_failure(store, options, environment, secrets, index, count, destinat
                         "evidence_id": record["id"], "required_action": required}}
 
 
-def _capture_window(store, options, facts, preflight_id, key, secrets, environment, index, count, destination):
+def _capture_window(store, options, facts, preflight_id, key, secrets, environment, index, count, destination, latch):
     """Run one bounded window: observed start, scripted app actions, bounded window, observed stop, retrieval.
 
-    The window outcome never decides the session outcome, and any capture this window started is stopped before
-    the outcome is returned. A failure stores its own rejection record with whatever this window observed.
+    A window whose stop was observed also reads the scoped addon logcat tail when decryption
+    was requested, so a rejected handshake becomes a per-host count instead of an unexplained
+    empty dump. The window outcome never decides the session outcome, and any capture this
+    window started is stopped before the outcome is returned. A failure stores its own
+    rejection record with whatever this window observed.
     """
     adb, serial = facts["adb_path"], facts["device"]["serial"]
     name = _capture_name()
     remote = DEVICE_DIRECTORY + "/" + name
     settings = _settings(name, options, environment)
     prefix = f"window {index}/{count}: " if count > 1 else ""
-    dispatch = start = stop = window_end = dump = precheck = force_stop = launch = None
+    restarted_before = bool(latch.restarted)
+    dispatch = start = stop = window_end = dump = precheck = force_stop = launch = diagnostics = None
 
     def reject(error):
         return _window_failure(store, options, environment, secrets, index, count, destination, preflight_id, error,
                                name=name, remote=remote, settings=settings, dispatch=dispatch, start=start, stop=stop,
                                window_end=window_end, dump=dump, force_stop=force_stop, launch=launch,
-                               precheck=precheck)
+                               precheck=precheck, restart=_restart_state(latch, restarted_before),
+                               tls=_tls_fields(diagnostics, _packet_data_state(dump=dump)))
 
     try:
         if index > 1:
             # Every window re-checks that no CaptureService is running; a foreign capture is never stopped.
-            precheck = _service_call(adb, serial, options["timeout"])
+            precheck = _service_call(adb, serial, options["timeout"], latch)
             status = (None if precheck["known"] and precheck["running"] is False
                       else ("capture-active" if precheck["running"] else "service-unknown"))
             if status is not None:
@@ -893,38 +1110,42 @@ def _capture_window(store, options, facts, preflight_id, key, secrets, environme
         print(f"forge pcapdroid-capture: {prefix}starting {name}", file=sys.stderr, flush=True)
         command = _start_command(adb, serial, options, name, key)
         try:
-            dispatch = _dispatch(_run(_dispatch_command(command, key), options["timeout"]), secrets)
+            dispatch = _dispatch(latch.run(_dispatch_command(command, key), options["timeout"]), secrets)
             if not dispatch["accepted"]:
                 raise ForgeError(f"Capture start was not dispatched: {dispatch['reason']}")
-            start = _await_start(adb, serial, remote, options)
+            start = _await_start(adb, serial, remote, options, latch)
             if not start["observed"]:
                 raise ForgeError("Both the capture service and this session's dump file were not observed within the consent timeout")
             print(_ready_message(options, start, index, count), file=sys.stderr, flush=True)
-            force_stop, launch = _scripted_actions(adb, serial, options, secrets)
+            force_stop, launch = _scripted_actions(adb, serial, options, secrets, latch)
             problem = _action_error(force_stop, launch)
             if problem is not None:
                 raise ForgeError(problem)
             _window(options["seconds"])
-            window_end = _observe(adb, serial, remote, options["timeout"])
+            window_end = _observe(adb, serial, remote, options["timeout"], latch)
         finally:
             if dispatch is not None and dispatch["accepted"] and start is not None and start["observed"]:
-                stop = _stop_session(adb, serial, options, key, secrets)
+                stop = _stop_session(adb, serial, options, key, secrets, latch)
             else:
                 stop = {"requested": False, "observed_stopped": False, "polls": 0, "service": None,
                         "reason": "No own capture start was observed; no stop was sent"}
         if stop.get("observed_stopped") is not True:
             raise ForgeError(_stop_detail(stop))
-        dump = _settled_file(adb, serial, remote, options)
+        if options["tls_decryption"]:
+            # Read straight after the observed stop and before the dump is judged: the classic
+            # late-trust-hook failure shows up here even when the dump holds no packet data.
+            diagnostics = _tls_diagnostics(adb, serial, options, latch)
+        dump = _settled_file(adb, serial, remote, options, latch)
         if not (dump["exists"] and dump["header_valid"]):
             detail = ("no dump file at all" if dump["size"] is None
                       else f"a {dump['size']}-byte file without a valid PCAP header")
             raise ForgeError(f"No readable dump file named {name} was observed on the device after the stop: {detail}; "
                              f"a running service or an unwritten dump is not this capture")
-        after_stop = _device_file(adb, serial, remote, options["timeout"])
+        after_stop = _device_file(adb, serial, remote, options["timeout"], latch)
         flushed = dump["size"] == after_stop["size"]
         if not flushed:
             raise ForgeError("Capture dump size was not stable after stop; nothing was published")
-        retrieval = _retrieve(adb, serial, remote, destination, options, after_stop["size"])
+        retrieval = _retrieve(adb, serial, remote, destination, options, after_stop["size"], latch)
         print(f"forge pcapdroid-capture: {prefix}capture stopped and {retrieval['size']} bytes retrieved as "
               f"{destination.name}", file=sys.stderr, flush=True)
         decryption = options["tls_decryption"]
@@ -946,6 +1167,8 @@ def _capture_window(store, options, facts, preflight_id, key, secrets, environme
             "retrieval": {"pulled": True, "published": True, "device_size": after_stop["size"],
                           "size": retrieval["size"], "sha256": retrieval["sha256"],
                           "max_dump_size_reached": retrieval["max_dump_size_reached"]},
+            **_restart_state(latch, restarted_before),
+            **_tls_fields(diagnostics, _packet_data_state(retrieval=retrieval)),
             "max_dump_size_reached": retrieval["max_dump_size_reached"],
             "dump_size_stable_after_stop": flushed,
             "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
@@ -972,7 +1195,7 @@ def _capture_window(store, options, facts, preflight_id, key, secrets, environme
             "failure": None, "error": None, "message": None}
 
 
-def _session_data(store, options, environment, facts, preflight_id, destination, windows, failures, observed):
+def _session_data(store, options, environment, facts, preflight_id, destination, windows, failures, observed, latch):
     decryption = options["tls_decryption"]
     serial = facts["device"]["serial"] if isinstance(facts.get("device"), dict) else options["serial"]
     running = observed["running"] if isinstance(observed, dict) and observed.get("known") else None
@@ -983,10 +1206,12 @@ def _session_data(store, options, environment, facts, preflight_id, destination,
             "completed_windows": sum(1 for entry in windows if entry["success"]),
             "seconds": options["seconds"], "gap_seconds": options["gap"], "max_bytes": options["max_bytes"],
             "force_stop": options["force_stop"], "launch": options["launch"],
+            "launch_no_wait": options["launch_no_wait"],
             "destination": _project_relative(store, destination), "settings": _settings(None, options, environment),
             "decryption_requested": decryption, "operator_approved_tls_decryption": decryption,
             "decryption_scope": _DECRYPTION_SCOPE if decryption else None,
             "windows": windows, "failures": failures, "service_after_session": observed,
+            **_restart_state(latch),
             "capture_running_after_session": running, "preflight_evidence_id": preflight_id,
             "evidence_ids": [preflight_id] + [entry["evidence_id"] for entry in windows if entry["evidence_id"]],
             "required_action": failures[0]["required_action"] if failures else None,
@@ -1001,8 +1226,10 @@ def pcapdroid_capture(args, store):
     secrets = (key, shlex.quote(key)) if key is not None else ()
     count = len(destinations)
     windows, failures, failed, completed = [], [], None, None
-    facts = _preflight(options["serial"], options["package"])
-    preflight = store.add("runtime", facts)
+    facts, latch = _preflight(options["serial"], options["package"])
+    if latch is not None:
+        latch.with_secrets(secrets)
+    preflight = store.add("runtime", {**facts, **_restart_state(latch)})
     adb = facts.get("adb_path")
     serial = facts["device"]["serial"] if isinstance(facts.get("device"), dict) else None
     try:
@@ -1019,7 +1246,7 @@ def pcapdroid_capture(args, store):
             if index > 1:
                 _gap(options["gap"])
             outcome = _capture_window(store, options, facts, preflight["id"], key, secrets, environment, index,
-                                      count, destination)
+                                      count, destination, latch)
             windows.append(outcome["summary"])
             if outcome["error"] is None:
                 completed = outcome["record"]
@@ -1033,16 +1260,16 @@ def pcapdroid_capture(args, store):
     except (ForgeError, OSError, ValueError, sqlite3.Error) as error:
         # Only a session-level refusal reaches here: window failures record themselves and end the loop.
         failed = _window_failure(store, options, environment, secrets, len(windows) + 1, count,
-                                 destinations[len(windows)], preflight["id"], error)
+                                 destinations[len(windows)], preflight["id"], error, restart=_restart_state(latch))
         windows.append(failed["summary"])
         failures.append(failed["failure"])
     attempted = len(windows)
     windows += [_window_summary(store, index, destination, attempted=False, success=False)
                 for index, destination in enumerate(destinations[attempted:], start=attempted + 1)]
-    observed = _service_call(adb, serial, options["timeout"]) if attempted and adb and serial else None
+    observed = _service_call(adb, serial, options["timeout"], latch) if attempted and adb and serial else None
     session = store.add("runtime", _session_data(store, options, environment, facts, preflight["id"],
                                                  destinations[0].parent if count > 1 else destinations[0],
-                                                 windows, failures, observed))
+                                                 windows, failures, observed, latch))
     if failed is not None:
         window = f"window {attempted}/{count} " if count > 1 else ""
         raise ForgeError(f"{failed['message']}; {window}rejection evidence {failed['failure']['evidence_id']}; "
@@ -1095,6 +1322,10 @@ def register(subparsers):
                         help=f"Seconds between capture windows (0..{MAX_GAP_SECONDS}, default: 0)")
     parser.add_argument("--launch", help="Optional PACKAGE/COMPONENT to launch in every window after the capture "
                                          "starts, for example ai.x.grok/.MainActivity")
+    parser.add_argument("--launch-no-wait", action="store_true",
+                        help="Dispatch that launch as a plain `am start -n` without -W, so an app that blocks in a "
+                             "wait mode (Gadget wait, onboarding) cannot hold the window; the launch evidence records "
+                             "wait_for_launch false")
     parser.add_argument("--force-stop", action="store_true",
                         help="Force-stop the target package before each window's launch")
     parser.add_argument("--tls-decryption", action="store_true",
