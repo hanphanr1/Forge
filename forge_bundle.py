@@ -37,14 +37,14 @@ _ENUMS = {
     "kind": {"dns_query", "dns_answer", "tls_sni", "http_host"},
     "method": {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "CONNECT", "TRACE"},
     "tool": {"static_index", "radare2", "graphql_analyze", "adb", "frida", "jadx", "android", "apktool", "apksigner",
-             "idevice_id", "idevicepair", "pcap", "pcapdroid"},
+             "idevice_id", "idevicepair", "pcap", "pcapdroid", "mitmproxy"},
     "action": {"imports", "exports", "strings", "functions", "disasm", "xrefs", "callgraph", "devices", "install",
                "install-multiple", "preflight", "pull", "push", "pull-package", "observe", "packages", "package",
                "frida-prerequisite", "apk-info", "decode", "manifest", "rebuild", "sign", "gadget", "ios-devices",
                "ios-pair", "decompile", "api-map", "capture", "pcap-analyze", "caller-map",
-               "capture-session", "capture-rejected"},
+               "capture-session", "capture-rejected", "flow-to-har"},
     "schema": {"forge.target-run/v2", "forge.target-verification/v2", "forge.native.v1", "forge.android.v1",
-               "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1",
+               "forge.apk/v1", "forge.ios.v1", "forge.pcap/v1", "forge.pcapdroid/v1", "forge.flows/v1",
                "forge.android-caller-map/v1"},
     "status": {"authorized", "absent", "unauthorized", "offline", "multiple", "missing-tool", "adb-failed",
                "incomplete-device-facts", "success", "failed", "timeout", "partial", "unavailable", "tool-failed",
@@ -55,7 +55,8 @@ _PRIVATE |= {"method_name", "field_name", "parameter_name"}
 _FLAGS |= {"trace_truncated"}
 _NUMBERS |= {"trace_items", "trace_items_omitted", "literal_line", "literal_column",
              "method_line", "method_end_line", "constructor_line", "argument_index",
-             "assignment_line", "overload_count"}
+             "assignment_line", "overload_count", "flows_skipped", "bodies_truncated",
+             "max_body_bytes", "limit"}
 _CONTAINERS |= {"source_traces", "field_links", "uses", "callers", "request_markers"}
 _PRIVATE |= {"hostname", "source_ip", "destination_ip", "uid", "package_hint", "remote",
              "remote_name", "api_key", "api_key_env", "collector_host"}

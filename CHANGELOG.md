@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.0 - 2026-10-15
+
+- New `flow-to-har` converts a mitmproxy flow dump into HAR for the existing `har-import` path. PCAPdroid's TLS decryption writes decrypted requests to mitmproxy, not into the PCAP file, so a capture asked for `--mitmproxy-opts "-w <path>"` now has a supported way in: pull the dump, convert it, import it. mitmproxy is an optional extra (`forge-protocol[flows]`), imported only when a dump is converted, and per-body byte caps plus truncation counts are recorded.
+- `pcapdroid-capture` gained `--mitmproxy-opts` (extra mitmproxy options, quoted for the device shell) and `--ssl-keylog NAME`; both require `--tls-decryption` and are recorded in the settings. With `--mitmproxy-opts "-w /sdcard/Download/PCAPdroid/flows.dump"` the addon writes flows the operator can pull back.
+- Exercised on hardware against the installed Grok build: decryption plus a trust bypass attached through the Gadget produced a 190 KB flow dump whose converted HAR yielded seven captured HTTP endpoints, including `POST grok.com/grok_api.Models/ListModes`, `POST grok.com/grok_api.AttestationService/GetAttestationChallenge`, `GET grok.com/_data/v1/app_config` and the `grok.com/ws/mgw/` WebSocket upgrade. Values stay withheld; only names, paths and statuses are exported.
+- Bundle projection keeps the flow counts and the `flow-to-har` action/schema while withholding dump paths.
+
 ## 0.17.0 - 2026-10-15
 
 - `apk-sign` now reads the required zip page alignment from the ELF `PT_LOAD` alignment of the APK's stored native libraries and passes it to `zipalign` as `-p`, `-P 16` or `-P 64`. Modern release builds link libraries with a 16 KiB max-page-size, and the previous hardcoded `-p 4` made the device refuse the package with `INSTALL_FAILED_INVALID_APK: Failed to extract native libraries, res=-2`.

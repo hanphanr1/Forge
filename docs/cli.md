@@ -164,6 +164,20 @@ that addon is missing — the hardware failure mode otherwise looks like a conse
 `--continue-on-error` keeps later windows running after one fails while the session record still reports
 `success: false`; the default is stop-at-first-failure.
 
+Decrypted traffic is **not** written into the PCAP file: PCAPdroid hands it to mitmproxy. Pass
+`--mitmproxy-opts "-w /sdcard/Download/PCAPdroid/flows.dump"` together with `--tls-decryption`, pull that dump
+from the device, then convert and import it:
+
+```sh
+forge --project target flow-to-har captures/flows.dump --output captures/flows.har --limit 500
+forge --project target har-import captures/flows.har --limit 50
+forge --project target api-shape --domain "<observed-host>"
+```
+
+`flow-to-har` needs the optional `flows` extra (`pip install 'forge-protocol[flows]'`), caps every body with
+`--max-body-bytes`, records truncation and flow counts, and makes no network calls. `--ssl-keylog NAME` instead
+asks PCAPdroid for an SSLKEYLOGFILE for offline decryption of captured TLS.
+
 `capture-ingest` runs a bounded loopback listener so a capture tool can push HAR directly instead of a manual export/import. It binds `127.0.0.1` only, stops at `--seconds` (1..3600), `--max-records` or an error, and accepts a HAR document, an entries array or one entry object. Each exchange is stored through the same normalization as `har-import`, so pushed traffic stays `captured_http` and is never promoted to live proof. With `--port 0` the chosen port is announced once on stderr; stdout stays `{ok, result}`. `--token` requires a matching `X-Forge-Token` or `Authorization: Bearer` header. Oversized bodies, wrong method/route, a bad token and malformed JSON are rejected with per-reason counters and never echo request data.
 
 `websocket-analyze` parses frames from HAR entries carrying `_webSocketMessages`/`_webSocketFrames` or from explicit `{"url", "frames"}` documents: per session it reports frame counts, direction (or `unknown` when the document cannot establish it), opcode/type counts, payload byte stats, close codes and JSON field-name paths only. `api-shape` summarizes stored HTTP evidence per domain: method/path identities, status distribution, and request/response header, JSON field-path, form and query *names*. Both are read-only, export names rather than values, and report their caps. See [capture ingest](capture-ingest.md).

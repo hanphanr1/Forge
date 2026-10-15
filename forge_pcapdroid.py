@@ -61,6 +61,7 @@ PCAP_MAGIC = {b"\xd4\xc3\xb2\xa1": "<", b"\xa1\xb2\xc3\xd4": ">",
 NANOSECOND_MAGIC = {b"\x4d\x3c\xb2\xa1", b"\xa1\xb2\x3c\x4d"}
 PACKAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+\Z")
 SERIAL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+KEYLOG_NAME = re.compile(r"forge-[a-f0-9]{32}\.log\Z")
 CAPTURE_NAME = re.compile(r"forge-[a-f0-9]{32}\.pcap\Z")
 DEVICE_PATH = re.compile(r"/sdcard/Download/PCAPdroid/forge-[a-f0-9]{32}\.pcap\Z")
 WINDOW_FILE = re.compile(r"window-[0-9]{2}\.pcap\Z")
@@ -378,6 +379,16 @@ def _capture_options(args):
                         ("continue_on_error", "--continue-on-error")):
         if type(getattr(args, name, False)) is not bool:
             raise ForgeError(f"{label} is a flag and takes no value")
+    mitmproxy_opts = (getattr(args, "mitmproxy_opts", None) or "").strip()
+    if len(mitmproxy_opts) > 2048 or any(ord(char) < 32 for char in mitmproxy_opts):
+        raise ForgeError("--mitmproxy-opts must be one printable line of at most 2048 characters")
+    ssl_keylog = (getattr(args, "ssl_keylog", None) or "").strip()
+    if ssl_keylog and (not KEYLOG_NAME.fullmatch(ssl_keylog) or len(ssl_keylog) > 64):
+        raise ForgeError("--ssl-keylog must be a plain file name such as forge-keys.log")
+    if mitmproxy_opts and not getattr(args, "tls_decryption", False):
+        raise ForgeError("--mitmproxy-opts only applies with --tls-decryption")
+    if ssl_keylog and not getattr(args, "tls_decryption", False):
+        raise ForgeError("--ssl-keylog only applies with --tls-decryption")
     package = getattr(args, "package", None)
     if not isinstance(package, str) or not PACKAGE_NAME.fullmatch(package):
         raise ForgeError("Provide a valid --package name, for example ai.x.grok")
@@ -386,7 +397,8 @@ def _capture_options(args):
             "launch": _launch_value(getattr(args, "launch", None)), "force_stop": getattr(args, "force_stop", False),
             "tls_decryption": getattr(args, "tls_decryption", False),
             "serial": _serial_value(getattr(args, "serial", None), "--serial"),
-            "continue_on_error": getattr(args, "continue_on_error", False)}
+            "continue_on_error": getattr(args, "continue_on_error", False),
+            "mitmproxy_opts": mitmproxy_opts or None, "ssl_keylog": ssl_keylog or None}
 
 
 def _api_key(environment):
@@ -489,6 +501,10 @@ def _settings(name, options, environment):
         settings["block_quic"] = "to_decrypt"
         settings["decryption_rules"] = json.dumps([{"type": "APP", "value": options["package"]}],
                                                   separators=(",", ":"))
+    if options.get("mitmproxy_opts"):
+        settings["mitmproxy_opts"] = options["mitmproxy_opts"]
+    if options.get("ssl_keylog"):
+        settings["sslkeylog_name"] = options["ssl_keylog"]
     return settings
 
 
@@ -535,6 +551,11 @@ def _start_command(adb, serial, options, name, key):
         # `adb shell` re-joins argv into one remote shell line, so the JSON value needs the
         # quoting the device shell strips again; unquoted JSON arrives stripped of its quotes.
         extras.append(("decryption_rules", shlex.quote(settings["decryption_rules"])))
+    if settings.get("mitmproxy_opts"):
+        # mitmproxy option strings contain spaces and flags; the device shell would split them.
+        extras.append(("mitmproxy_opts", shlex.quote(settings["mitmproxy_opts"])))
+    if settings.get("sslkeylog_name"):
+        extras.append(("sslkeylog_name", settings["sslkeylog_name"]))
     return _intent_command(adb, serial, "start", key, extras)
 
 
@@ -1082,6 +1103,12 @@ def register(subparsers):
     parser.add_argument("--continue-on-error", action="store_true",
                         help="With --repeat, keep running later windows after one fails; the session record still "
                              "reports success false when any window failed")
+    parser.add_argument("--mitmproxy-opts",
+                        help="Extra mitmproxy options for --tls-decryption, for example -w "
+                             "/sdcard/Download/PCAPdroid/flows.dump so the addon writes flows it can read back")
+    parser.add_argument("--ssl-keylog", metavar="NAME",
+                        help="With --tls-decryption, ask PCAPdroid for an SSLKEYLOGFILE named like "
+                             "forge-<32hex>.log under Download/PCAPdroid")
     parser.add_argument("--api-key-env",
                         help="Environment variable holding the PCAPdroid API key; the key is never stored or echoed")
     parser.add_argument("--max-bytes", type=int, default=33554432,

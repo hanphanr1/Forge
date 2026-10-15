@@ -143,6 +143,24 @@ intact; `--continue-on-error` keeps later windows running instead, with the sess
 scoped fact, and `--tls-decryption` refuses with `mitm-addon-absent` before any Intent is sent when that addon
 is missing — on hardware the missing app otherwise looks like a consent timeout that never resolves.
 
+### Seeing decrypted requests (paths, methods, bodies)
+
+PCAPdroid's decryption does **not** put plaintext into the PCAP file — it hands decrypted traffic to a local
+mitmproxy, and the PCAP still holds TLS records on both legs. To collect the requests:
+
+```console
+forge pcapdroid-capture --serial OWNED --package com.example.app --tls-decryption \
+  --mitmproxy-opts "-w /sdcard/Download/PCAPdroid/flows.dump" --seconds 40 --path captures/run.pcap
+adb pull /sdcard/Download/PCAPdroid/flows.dump captures/flows.dump
+forge flow-to-har captures/flows.dump --output captures/flows.har
+forge har-import captures/flows.har --limit 50
+forge api-shape --domain "<observed-host>"
+```
+
+`flow-to-har` needs the optional `flows` extra. Captures of the repackaged build can attach the trust-bypass
+script below so an app that distrusts user CAs accepts the mitm certificate. Decrypted bodies stay local; the
+HAR import keeps names, paths and statuses and withholds values.
+
 ### Cross-file caller candidates
 
 `android-caller-map --jadx-evidence ID --method NAME [--class OWNER] [--path-filter SUBSTRING]` answers "who
