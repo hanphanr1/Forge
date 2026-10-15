@@ -80,6 +80,8 @@ _CONTAINERS |= {"capture", "hosts", "flows", "static_host_matches", "windows", "
                 "decryption_basis"}
 _SAFE_STRINGS |= {"http_methods"}
 _PRIVATE |= {"file", "receiver", "http_paths", "decryption_scope"}
+_FLAGS |= {"extract_native_libs_enabled"}
+_CONTAINERS |= {"so_page_alignment"}
 _SCOPE = [
     "Metadata projection only: raw bodies, streams, argv, stdin, local paths, captures, screenshots and artifact blobs are excluded.",
     "Claims are author statements, not independently proven findings; free-text claims are withheld unless explicitly requested.",

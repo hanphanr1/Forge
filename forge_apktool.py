@@ -36,6 +36,7 @@ DEBUG_PASSWORD = "android"
 COMPONENT_TAGS = {"activity", "activity-alias", "service", "receiver", "provider"}
 GADGET_NAME = "libfridagadget.so"
 GADGET_CONFIG_NAME = "libfridagadget.config.so"
+ANDROID_EXTRACT_NATIVE_LIBS = 0x010104EA
 WRAP_NAME = "wrap.sh"
 MAX_GADGET = 64 * 1024 * 1024
 GADGET_ABIS = {3: "x86", 40: "armeabi-v7a", 62: "x86_64", 183: "arm64-v8a", 243: "riscv64"}
@@ -388,6 +389,103 @@ def _keystore_arguments(args, store):
     return keystore, alias, os.environ.get(args.store_pass_env or "", None), os.environ.get(args.key_pass_env or "", None), False
 
 
+def _enable_extract_native_libs(apk_path):
+    """Set android:extractNativeLibs="true" inside a compiled binary manifest, in place.
+
+    A Gadget repackage needs the platform to extract lib/<abi>/ so that wrap.sh + LD_PRELOAD can
+    run. Release builds ship extractNativeLibs="false", and installing such an APK with an injected
+    wrapper fails with INSTALL_FAILED_INVALID_APK ("Failed to extract native libraries"). The
+    attribute lives in a fixed-size binary-XML attribute record, so flipping its boolean value
+    needs no decode/rebuild and does not change the manifest length. Returns True when it wrote a
+    new value, False when the flag was already true or absent.
+    """
+    apk_path = Path(apk_path)
+    with zipfile.ZipFile(apk_path) as archive:
+        names = archive.namelist()
+        if "AndroidManifest.xml" not in names:
+            raise ForgeError("Repackaged APK has no AndroidManifest.xml")
+        manifest = archive.read("AndroidManifest.xml")
+        payload = {name: (archive.read(name), archive.getinfo(name)) for name in names}
+    patched = bytearray(manifest)
+    changed = False
+    resource_map = []
+    pos = 8
+    while pos + 8 <= len(patched):
+        kind, header, size = struct.unpack_from("<HHI", patched, pos)
+        if header < 8 or size < header or pos + size > len(patched):
+            break
+        if kind == 0x0180:  # RES_XML_RESOURCE_MAP_TYPE
+            count = (size - header) // 4
+            resource_map = list(struct.unpack_from("<%dI" % count, patched, pos + header))
+        if kind == 0x0102 and size >= 36:  # RES_XML_START_ELEMENT_TYPE
+            _name, attr_start, attr_size, attr_count = struct.unpack_from("<IHHH", patched, pos + 20)
+            for index in range(attr_count):
+                base = pos + 16 + attr_start + index * attr_size
+                if attr_size < 20 or base + 20 > pos + size:
+                    break
+                name_index = struct.unpack_from("<I", patched, base + 4)[0]
+                resource_id = resource_map[name_index] if name_index < len(resource_map) else 0
+                if resource_id == ANDROID_EXTRACT_NATIVE_LIBS:
+                    if patched[base + 15] == 0x12 and struct.unpack_from("<I", patched, base + 16)[0] == 0:
+                        struct.pack_into("<I", patched, base + 16, 0xFFFFFFFF)
+                        changed = True
+        pos += size
+    if not changed:
+        return False
+    temporary = apk_path.with_name(apk_path.name + ".patched")
+    with zipfile.ZipFile(temporary, "w") as output_archive:
+        for name in names:
+            data, info = payload[name]
+            entry = zipfile.ZipInfo(name, date_time=info.date_time)
+            entry.compress_type = info.compress_type
+            entry.external_attr = info.external_attr
+            entry.internal_attr = info.internal_attr
+            entry.create_system = info.create_system
+            output_archive.writestr(entry, patched if name == "AndroidManifest.xml" else data)
+    os.replace(temporary, apk_path)
+    return True
+
+
+def _so_page_alignment(source):
+    """Pick the zipalign page flag from the PT_LOAD alignment the APK's uncompressed libs demand.
+
+    Modern release builds link native libraries with a 16 KiB (or 64 KiB) max-page-size; aligning
+    them to 4 KiB makes the installer refuse the package with INSTALL_FAILED_INVALID_APK
+    ("Failed to extract native libraries"), so the required page size is read from the ELF
+    program headers instead of being assumed.
+    """
+    required = 0
+    try:
+        with zipfile.ZipFile(source) as archive:
+            for entry in archive.infolist():
+                if entry.compress_type != zipfile.ZIP_STORED or not entry.filename.endswith(".so"):
+                    continue
+                with archive.open(entry) as stream:
+                    header = stream.read(64)
+                if len(header) < 64 or header[:4] != b"\x7fELF" or header[4] != 2:
+                    continue
+                phoff = struct.unpack_from("<Q", header, 32)[0]
+                phentsize, phnum = struct.unpack_from("<HH", header, 54)
+                program = phoff + phnum * phentsize
+                if program > entry.file_size or program > (1 << 20):
+                    continue
+                with archive.open(entry) as stream:
+                    data = stream.read(program)
+                for index in range(phnum):
+                    offset = phoff + index * phentsize
+                    if offset + 56 > len(data):
+                        continue
+                    if struct.unpack_from("<I", data, offset)[0] == 1:  # PT_LOAD
+                        required = max(required, struct.unpack_from("<Q", data, offset + 48)[0])
+    except (OSError, zipfile.BadZipFile, struct.error):
+        required = 0
+    if required >= 65536:
+        return ["-P", "64"]
+    if required >= 16384:
+        return ["-P", "16"]
+    return ["-p"]
+
+
 def sign(args, store):
     source = _input(store, args.path)
     if not source.is_file() or source.suffix.lower() != ".apk":
@@ -401,8 +499,10 @@ def sign(args, store):
     aligned = staging / "aligned.apk"
     signed = staging / "signed.apk"
     steps = {}
+    align_flag = _so_page_alignment(source)
     try:
-        code, stdout, stderr, expired = _run([align_tool["path"], "-f", "-p", "4", str(source), str(aligned)], args.timeout)
+        code, stdout, stderr, expired = _run([align_tool["path"], "-f", *align_flag, "4", str(source), str(aligned)],
+                                             args.timeout)
         steps["zipalign"] = {"returncode": code, "timed_out": expired,
                              "stdout": scrub_text(stdout.decode("utf-8", "replace")),
                              "stderr": scrub_text(stderr.decode("utf-8", "replace"))}
@@ -433,7 +533,7 @@ def sign(args, store):
     record = store.add("analysis", {"schema": SCHEMA, "tool": "apksigner", "action": "sign",
                                     "input": _relative(store, source), "output_path": _relative(store, output),
                                     "sha256": digest, "size": size, "verified": verified,
-                                    "debug_identity": generated, "alias": alias,
+                                    "debug_identity": generated, "alias": alias, "so_page_alignment": align_flag,
                                     "steps": {name: {key: value for key, value in step.items() if key != "stdout"}
                                               for name, step in steps.items()},
                                     "scope": "Signing proves key possession for these bytes only. A debug identity is "
@@ -484,6 +584,12 @@ def gadget(args, store):
             failure = "The gadget inside the repackaged APK does not match the supplied shared object"
         if failure is None and package_before and package_after and package_before != package_after:
             failure = f"Repackaging changed the package name ({package_before} -> {package_after})"
+        flipped = None
+        if failure is None:
+            try:
+                flipped = _enable_extract_native_libs(staged)
+            except (ForgeError, OSError, zipfile.BadZipFile) as error:
+                failure = f"The AndroidManifest extractNativeLibs flag could not be set: {error}"
         success = failure is None
         if success:
             digest, size = _copy_bounded(staged, output)
@@ -498,6 +604,7 @@ def gadget(args, store):
                                     "gadget_bitness": bitness, "config_keys": [key for key, _ in config],
                                     "package_before": package_before, "package_after": package_after,
                                     "embedded_gadget_matches": embedded == gadget_digest,
+                                    "extract_native_libs_enabled": flipped,
                                     "injected_members": [f"lib/{abi}/{GADGET_NAME}", f"lib/{abi}/{WRAP_NAME}",
                                                          f"lib/{abi}/{GADGET_CONFIG_NAME}"],
                                     "archive_entries": entry_count,

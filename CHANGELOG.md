@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.0 - 2026-10-15
+
+- `apk-sign` now reads the required zip page alignment from the ELF `PT_LOAD` alignment of the APK's stored native libraries and passes it to `zipalign` as `-p`, `-P 16` or `-P 64`. Modern release builds link libraries with a 16 KiB max-page-size, and the previous hardcoded `-p 4` made the device refuse the package with `INSTALL_FAILED_INVALID_APK: Failed to extract native libraries, res=-2`.
+- `apk-gadget` now sets `android:extractNativeLibs="true"` in the repackaged binary manifest (attribute-level patch, no decode/rebuild, idempotent). A Gadget repackage depends on `wrap.sh` + `LD_PRELOAD`, which needs the platform to extract `lib/<abi>/`; release builds ship `extractNativeLibs="false"`, so the repackage used to fail installation with the same native-library error. Both changes were needed on hardware before a repackaged build would install at all.
+- Bundle projection keeps the new `so_page_alignment` and `extract_native_libs_enabled` facts.
+
 ## 0.16.0 - 2026-10-15
 
 - `pcapdroid-preflight` now observes the PCAPdroid MITM addon (`com.pcapdroid.mitm`) as its own scoped fact (installed, version), and `pcapdroid-capture --tls-decryption` refuses with `mitm-addon-absent` before any Intent is sent when the addon is missing. On hardware this turned a silent 60-second consent timeout into one actionable message naming the official addon repository; a missing CA or pinning still only limits decryption, never the capture.

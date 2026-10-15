@@ -33,6 +33,28 @@ def apk_bytes(extra=()):
     return buffer.getvalue()
 
 
+EXTRACT_NATIVE_LIBS_ID = 0x010104EA
+
+
+def binary_manifest(extract_native_libs=False, other_id=0x0101000F, other_value=0xFFFFFFFF):
+    """Minimal compiled manifest: XML header, string pool, resource map, one element with two attrs."""
+    def chunk(kind, header, body):
+        # body is everything after the 8-byte common chunk header
+        return struct.pack("<HHI", kind, header, 8 + len(body)) + body
+
+    resources = [other_id, EXTRACT_NATIVE_LIBS_ID]
+    string_pool = chunk(0x0001, 28, b"\0" * 20)
+    resource_map = chunk(0x0180, 8, struct.pack("<%dI" % len(resources), *resources))
+    ext = struct.pack("<IIHHH", 20, 1, 20, 20, 2)          # ns, name, attrStart, attrSize, attrCount
+    ext += struct.pack("<HHH", 0, 0, 0)                     # idIndex, classIndex, styleIndex
+    first = struct.pack("<IIIHBBI", 0, 0, 0xFFFFFFFF, 8, 0, 0x10, other_value & 0xFFFFFFFF)
+    second = struct.pack("<IIIHBBI", 0, 1, 0xFFFFFFFF, 8, 0, 0x12, 1 if extract_native_libs else 0)
+    element_body = b"\0" * 8 + ext + first + second         # lineNumber + comment, then ext block
+    element = struct.pack("<HHI", 0x0102, 16, 8 + len(element_body)) + element_body
+    payload = string_pool + resource_map + element
+    return chunk(0x0003, 8, payload)
+
+
 class GadgetTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -182,6 +204,77 @@ class GadgetTests(unittest.TestCase):
 def json_repr(value):
     import json
     return json.dumps(value)
+
+
+class NativeLibraryPackagingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name).resolve()
+        self.store = EvidenceStore(self.root)
+
+    def tearDown(self):
+        self.store.connection.close()
+        self.temp.cleanup()
+
+    def write_apk(self, name, *, lib_align=None, manifest=None):
+        path = self.root / name
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("AndroidManifest.xml", manifest if manifest is not None else b"\x03\x00\x08\x00" + b"\0" * 8)
+            if lib_align is not None:
+                with archive.open("lib/arm64-v8a/libfixture.so", "w") as entry:
+                    pass
+        return path
+
+    def test_elf_load_alignment_selects_the_zipalign_page_flag(self):
+        def elf(p_align):
+            header = bytearray(64)
+            header[0:4] = b"\x7fELF"
+            header[4] = 2
+            struct.pack_into("<Q", header, 32, 64)          # e_phoff
+            struct.pack_into("<HH", header, 54, 56, 1)      # e_phentsize, e_phnum
+            program = bytearray(56)
+            struct.pack_into("<I", program, 0, 1)           # PT_LOAD
+            struct.pack_into("<Q", program, 48, p_align)
+            return bytes(header) + bytes(program)
+
+        for align, expected in ((4096, ["-p"]), (16384, ["-P", "16"]), (65536, ["-P", "64"])):
+            with self.subTest(align=align):
+                path = self.root / f"libs-{align}.apk"
+                with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+                    archive.writestr("lib/arm64-v8a/libfixture.so", elf(align))
+                self.assertEqual(forge_apktool._so_page_alignment(path), expected)
+
+        plain = self.root / "no-libs.apk"
+        with zipfile.ZipFile(plain, "w") as archive:
+            archive.writestr("classes.dex", b"dex")
+        self.assertEqual(forge_apktool._so_page_alignment(plain), ["-p"])
+
+    def test_extract_native_libs_is_flipped_once_and_stays_a_valid_manifest(self):
+        path = self.root / "manifest.apk"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("AndroidManifest.xml", binary_manifest(extract_native_libs=False))
+            archive.writestr("classes.dex", b"dex")
+        self.assertTrue(forge_apktool._enable_extract_native_libs(path))
+        with zipfile.ZipFile(path) as archive:
+            patched = archive.read("AndroidManifest.xml")
+        self.assertIn(struct.pack("<i", -1), patched[-8:])
+        self.assertFalse(forge_apktool._enable_extract_native_libs(path),
+                         "a manifest that already allows extraction must not be rewritten again")
+        with zipfile.ZipFile(path) as archive:
+            self.assertEqual(archive.read("classes.dex"), b"dex")
+
+    def test_extract_native_libs_left_alone_when_already_true(self):
+        path = self.root / "already.apk"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("AndroidManifest.xml", binary_manifest(extract_native_libs=True))
+        self.assertFalse(forge_apktool._enable_extract_native_libs(path))
+
+    def test_missing_manifest_is_refused(self):
+        path = self.root / "no-manifest.apk"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("classes.dex", b"dex")
+        with self.assertRaisesRegex(ForgeError, "no AndroidManifest.xml"):
+            forge_apktool._enable_extract_native_libs(path)
 
 
 if __name__ == "__main__":
