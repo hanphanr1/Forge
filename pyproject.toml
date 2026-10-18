@@ -26,7 +26,7 @@ classifiers = [
 
 [project.optional-dependencies]
 http = ["curl-cffi>=0.16.3,<0.17"]
-flows = ["mitmproxy>=11,<12"]
+flows = ["mitmproxy>=11.0.2,<12"]
 
 [project.scripts]
 forge = "forge:main"
