@@ -25,7 +25,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-http = ["curl-cffi>=0.16.3,<0.17"]
+http = ["curl-cffi>=0.17.0,<0.18"]
 flows = ["mitmproxy>=11,<12"]
 
 [project.scripts]
